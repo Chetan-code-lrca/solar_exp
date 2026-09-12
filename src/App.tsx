@@ -1,31 +1,38 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useGame } from './game/useGame';
-import { renderGame } from './game/renderer';
-import { planets, ORBITAL_SPEEDS } from './game/types';
+import { render } from './game/renderer';
+import { PLANETS } from './game/types';
 
 export default function App() {
   const {
     state,
-    terrainRef,
-    starsRef,
+    canvasRef: sizeRef,
     setCanvasSize,
     beginExpedition,
     selectPlanet,
+    openBriefing,
+    cancelBriefing,
     launchMission,
     beginLanding,
+    continueOrbit,
     beginSurface,
-    returnToShip,
+    boardShip,
+    scanTarget,
+    returnFromComplete,
+    finishReturn,
+    setMobileKey,
     keysRef,
   } = useGame();
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const timeRef = useRef(0);
-  const [mobileControls, setMobileControls] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+  const [showHowToPlay, setShowHowToPlay] = useState(false);
 
   // Detect mobile
   useEffect(() => {
-    const check = () => setMobileControls(window.innerWidth < 768 || 'ontouchstart' in window);
+    const check = () => setIsMobile(window.innerWidth < 768 || 'ontouchstart' in window);
     check();
     window.addEventListener('resize', check);
     return () => window.removeEventListener('resize', check);
@@ -58,49 +65,45 @@ export default function App() {
     if (!ctx) return;
 
     let raf: number;
-    const render = () => {
+    const loop = () => {
       timeRef.current += 0.016;
-      renderGame(ctx, state, terrainRef.current, starsRef.current, canvas.width, canvas.height, timeRef.current);
-      raf = requestAnimationFrame(render);
+      render(ctx, state, canvas.width, canvas.height, timeRef.current);
+      raf = requestAnimationFrame(loop);
     };
-    raf = requestAnimationFrame(render);
+    raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [state, terrainRef, starsRef]);
+  }, [state]);
 
-  // Surface space key handler for takeoff
+  // Surface keyboard handler for scan/board
   useEffect(() => {
-    if (state.mode !== 'surface') return;
+    if (state.mode !== 'surface' && state.mode !== 'mission-complete') return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key === ' ' && state.nearShip && state.missionProgress >= state.missionTarget) {
+      if (e.key === ' ') {
         e.preventDefault();
-        returnToShip();
+        if (state.nearTarget && !state.nearTarget.scanned) {
+          scanTarget();
+        } else if (state.nearLander && state.missionProgress >= state.missionTarget) {
+          boardShip();
+        }
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [state.mode, state.nearShip, state.missionProgress, state.missionTarget, returnToShip]);
+  }, [state.mode, state.nearTarget, state.nearLander, state.missionProgress, state.missionTarget, scanTarget, boardShip]);
 
-  // Mobile touch controls
-  const handleTouch = useCallback((dir: string, pressed: boolean) => {
-    const k = keysRef.current;
-    switch (dir) {
-      case 'up': k.up = pressed; break;
-      case 'down': k.down = pressed; break;
-      case 'left': k.left = pressed; break;
-      case 'right': k.right = pressed; break;
-      case 'space':
-        if (pressed) {
-          k.space = true;
-          // Also handle takeoff on mobile
-          if (state.mode === 'surface' && state.nearShip && state.missionProgress >= state.missionTarget) {
-            returnToShip();
-          }
-        }
-        break;
-    }
-  }, [keysRef, state.mode, state.nearShip, state.missionProgress, state.missionTarget, returnToShip]);
+  // Nearest target distance
+  const nearestUnscanned = state.scanTargets
+    .filter(t => !t.scanned)
+    .sort((a, b) => {
+      const da = Math.hypot(state.playerX - a.x, state.playerY - a.y);
+      const db = Math.hypot(state.playerX - b.x, state.playerY - b.y);
+      return da - db;
+    })[0];
+  const nearestDist = nearestUnscanned
+    ? Math.round(Math.hypot(state.playerX - nearestUnscanned.x, state.playerY - nearestUnscanned.y))
+    : 0;
 
-  const selectedPlanet = state.selectedPlanetIndex !== null ? planets[state.selectedPlanetIndex] : null;
+  const selectedPlanet = state.selectedPlanetIndex !== null ? PLANETS[state.selectedPlanetIndex] : null;
 
   return (
     <div className="w-full h-screen bg-gray-950 overflow-hidden relative flex flex-col select-none">
@@ -108,325 +111,448 @@ export default function App() {
       <div ref={containerRef} className="flex-1 relative">
         <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
 
-        {/* ============ INTRO OVERLAY ============ */}
-        {state.mode === 'intro' && (
-          <div className="absolute inset-0 flex items-center justify-center z-50 bg-black/70 backdrop-blur-sm">
-            <div className="bg-gray-900/95 border border-blue-900/50 rounded-2xl p-8 max-w-md mx-4 text-center shadow-2xl shadow-blue-900/20 animate-fade-in">
-              <div className="text-4xl mb-4">🚀</div>
-              <h1 className="text-2xl font-bold text-white mb-2">COMMANDER'S LOG</h1>
-              <div className="w-16 h-0.5 bg-blue-500/50 mx-auto mb-4" />
-              <p className="text-gray-300 text-sm leading-relaxed mb-6">
-                Your mission is to explore the Solar System, land on planets, collect scientific data, and return safely to Earth.
+        {/* ============ MENU OVERLAY ============ */}
+        {state.mode === 'menu' && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center z-50">
+            <div className="text-center animate-fade-in">
+              <h1 className="text-4xl md:text-6xl font-bold text-white tracking-wider mb-2" style={{ textShadow: '0 0 30px rgba(100,150,255,0.3)' }}>
+                SOLARIS EXPEDITION
+              </h1>
+              <p className="text-gray-400 text-sm md:text-base mb-8 max-w-md mx-auto px-4">
+                Explore the Solar System.<br />
+                Land where you can.<br />
+                Discover what nobody has seen.
               </p>
-              <p className="text-gray-400 text-xs mb-6">
-                Use WASD or Arrow Keys to move. Press SPACE to interact.
-              </p>
-              <button
-                onClick={beginExpedition}
-                className="px-8 py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg transition-all hover:scale-105 active:scale-95 shadow-lg shadow-blue-600/30"
-              >
-                BEGIN EXPEDITION
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* ============ MISSION PANEL (Solar System) ============ */}
-        {state.mode === 'solar-system' && selectedPlanet && (
-          <div className="absolute top-4 right-4 w-72 md:w-80 bg-gray-900/95 backdrop-blur-sm border border-gray-700/50 rounded-xl p-5 shadow-2xl z-30 animate-fade-in">
-            <div className="flex items-center gap-3 mb-3">
-              <div
-                className="w-10 h-10 rounded-full flex-shrink-0"
-                style={{
-                  background: `radial-gradient(circle at 35% 35%, ${selectedPlanet.color}, ${selectedPlanet.secondaryColor})`,
-                  boxShadow: `0 0 10px 3px ${selectedPlanet.color}40`,
-                }}
-              />
-              <div>
-                <h2 className="text-lg font-bold text-white">{selectedPlanet.name}</h2>
-                <p className="text-gray-500 text-xs">
-                  {state.visitedPlanets.includes(selectedPlanet.name) ? '✓ Visited' : 'Unexplored'}
-                  {state.completedMissions.includes(selectedPlanet.name) && ' • Mission Complete'}
-                </p>
+              <div className="flex flex-col items-center gap-3">
+                <button
+                  onClick={beginExpedition}
+                  className="px-8 py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg transition-all hover:scale-105 active:scale-95 shadow-lg shadow-blue-600/30 text-sm md:text-base"
+                >
+                  BEGIN EXPEDITION
+                </button>
+                <button
+                  onClick={() => setShowHowToPlay(true)}
+                  className="px-6 py-2 bg-gray-800/60 hover:bg-gray-700/60 text-gray-300 rounded-lg transition-all text-sm"
+                >
+                  HOW TO PLAY
+                </button>
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-2 mb-3">
-              <StatBox label="Distance" value={selectedPlanet.distanceFromSun} />
-              <StatBox label="Gravity" value={selectedPlanet.gravity} />
-              <StatBox label="Temperature" value={selectedPlanet.temperature} />
-              <StatBox label="Atmosphere" value={selectedPlanet.atmosphere} />
+            {/* How to play modal */}
+            {showHowToPlay && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/60 z-60" onClick={() => setShowHowToPlay(false)}>
+                <div className="bg-gray-900/95 border border-gray-700 rounded-xl p-6 max-w-sm mx-4" onClick={e => e.stopPropagation()}>
+                  <h3 className="text-white font-bold mb-3">HOW TO PLAY</h3>
+                  <div className="text-gray-300 text-sm space-y-2">
+                    <p>• Click planets in the Solar System to select them</p>
+                    <p>• Launch missions to explore each world</p>
+                    <p>• Use <span className="text-blue-300">WASD</span> or <span className="text-blue-300">Arrow Keys</span> to move</p>
+                    <p>• Press <span className="text-blue-300">SPACE</span> to scan samples or board ship</p>
+                    <p>• Complete missions to earn Research Points</p>
+                    <p>• Return to your lander and take off to continue</p>
+                  </div>
+                  <button
+                    onClick={() => setShowHowToPlay(false)}
+                    className="mt-4 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm"
+                  >
+                    GOT IT
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ============ SOLAR SYSTEM HUD ============ */}
+        {state.mode === 'solar-system' && (
+          <>
+            {/* Mission Control HUD */}
+            <div className="absolute top-4 left-4 z-30">
+              <div className="bg-gray-900/80 backdrop-blur-sm border border-gray-700/40 rounded-xl p-3">
+                <div className="text-gray-500 text-[10px] uppercase tracking-wider mb-2">Mission Control</div>
+                <div className="space-y-1.5 text-xs">
+                  <HudRow label="Research" value={state.researchPoints.toString()} color="text-yellow-400" />
+                  <HudRow label="Fuel" value={`${Math.round(state.fuel)}%`} color={state.fuel < 20 ? 'text-red-400' : 'text-green-400'} />
+                  <HudRow label="Hull" value={`${Math.round(state.hull)}%`} color="text-cyan-400" />
+                  <HudRow label="Planets" value={`${state.visitedPlanets.length}/8`} color="text-blue-400" />
+                </div>
+              </div>
             </div>
 
-            <div className="bg-gray-800/50 rounded-lg p-3 mb-3">
-              <div className="text-gray-500 text-xs mb-1">MISSION OBJECTIVE</div>
-              <div className="text-blue-300 text-sm font-medium">{selectedPlanet.mission}</div>
-              <div className="flex items-center gap-1 mt-2">
-                <span className="text-gray-500 text-xs">Difficulty:</span>
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <span key={i} className={`text-xs ${i < selectedPlanet.difficulty ? 'text-red-400' : 'text-gray-700'}`}>
-                    ●
-                  </span>
+            {/* Planet selection panel */}
+            {selectedPlanet && (
+              <div className="absolute top-4 right-4 w-64 md:w-72 bg-gray-900/90 backdrop-blur-sm border border-gray-700/50 rounded-xl p-4 z-30 animate-fade-in">
+                <div className="flex items-center gap-2 mb-3">
+                  <div
+                    className="w-8 h-8 rounded-full flex-shrink-0"
+                    style={{
+                      background: `radial-gradient(circle at 35% 35%, ${selectedPlanet.color}, ${selectedPlanet.secondaryColor})`,
+                      boxShadow: `0 0 8px 2px ${selectedPlanet.color}40`,
+                    }}
+                  />
+                  <div>
+                    <h2 className="text-white font-bold text-sm">{selectedPlanet.name}</h2>
+                    <p className="text-gray-500 text-[10px]">
+                      {state.visitedPlanets.includes(selectedPlanet.name) ? '✓ Visited' : 'Unexplored'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-1.5 mb-3">
+                  <MiniStat label="Distance" value={selectedPlanet.distanceFromSun} />
+                  <MiniStat label="Gravity" value={selectedPlanet.gravity} />
+                  <MiniStat label="Temp" value={selectedPlanet.temperature} />
+                  <MiniStat label="Atmo" value={selectedPlanet.atmosphere} />
+                </div>
+
+                <div className="bg-gray-800/40 rounded-lg p-2 mb-3">
+                  <div className="text-gray-500 text-[10px]">MISSION</div>
+                  <div className="text-blue-300 text-xs">{selectedPlanet.mission}</div>
+                  <div className="flex items-center gap-1 mt-1">
+                    <span className="text-gray-500 text-[10px]">Difficulty:</span>
+                    {Array.from({ length: 5 }).map((_, i) => (
+                      <span key={i} className={`text-[8px] ${i < selectedPlanet.difficulty ? 'text-red-400' : 'text-gray-700'}`}>●</span>
+                    ))}
+                  </div>
+                </div>
+
+                <button
+                  onClick={openBriefing}
+                  className="w-full py-2 bg-blue-600/80 hover:bg-blue-500 text-white text-xs font-bold rounded-lg transition-all"
+                >
+                  SELECT DESTINATION →
+                </button>
+              </div>
+            )}
+
+            {/* Planet quick-select bar */}
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20">
+              <div className="flex flex-wrap justify-center gap-1 bg-gray-900/60 backdrop-blur-sm rounded-full px-3 py-2 border border-gray-800/50">
+                {PLANETS.map((planet, i) => (
+                  <button
+                    key={planet.name}
+                    onClick={() => selectPlanet(i)}
+                    className={`px-2 py-1 rounded-md text-[10px] transition-all ${
+                      state.selectedPlanetIndex === i
+                        ? 'bg-blue-600/60 text-white'
+                        : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
+                    }`}
+                  >
+                    <span className="inline-block w-1.5 h-1.5 rounded-full mr-1" style={{ backgroundColor: planet.color }} />
+                    {planet.name}
+                    {state.completedMissions.includes(planet.name) && ' ✓'}
+                  </button>
                 ))}
               </div>
             </div>
-
-            <button
-              onClick={launchMission}
-              disabled={state.fuel < selectedPlanet.difficulty * 5}
-              className="w-full py-2.5 bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 disabled:from-gray-700 disabled:to-gray-700 disabled:text-gray-500 text-white font-bold rounded-lg transition-all hover:scale-[1.02] active:scale-95 shadow-lg shadow-blue-600/20 disabled:shadow-none"
-            >
-              {state.fuel < selectedPlanet.difficulty * 5 ? 'INSUFFICIENT FUEL' : '🚀 LAUNCH MISSION'}
-            </button>
-          </div>
+          </>
         )}
 
-        {/* ============ SOLAR SYSTEM PLANET LIST ============ */}
-        {state.mode === 'solar-system' && (
-          <div className="absolute bottom-4 left-4 right-4 flex flex-wrap justify-center gap-1 z-20">
-            {planets.map((planet, i) => (
-              <button
-                key={planet.name}
-                onClick={() => selectPlanet(i)}
-                className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                  state.selectedPlanetIndex === i
-                    ? 'bg-blue-600/80 text-white shadow-lg shadow-blue-600/20'
-                    : 'bg-gray-800/60 text-gray-400 hover:bg-gray-700/60 hover:text-white'
-                }`}
-              >
-                <span className="inline-block w-2 h-2 rounded-full mr-1.5" style={{ backgroundColor: planet.color }} />
-                {planet.name}
-                {state.completedMissions.includes(planet.name) && ' ✓'}
-              </button>
-            ))}
-          </div>
-        )}
+        {/* ============ BRIEFING OVERLAY ============ */}
+        {state.mode === 'briefing' && selectedPlanet && (
+          <div className="absolute inset-0 flex items-center justify-center z-50 bg-black/50 backdrop-blur-sm">
+            <div className="bg-gray-900/95 border border-blue-900/50 rounded-xl p-6 max-w-sm mx-4 animate-fade-in">
+              <h2 className="text-blue-400 text-lg font-bold mb-1">{selectedPlanet.name.toUpperCase()} EXPEDITION</h2>
+              <div className="w-12 h-0.5 bg-blue-500/50 mb-4" />
 
-        {/* ============ ORBIT HUD ============ */}
-        {state.mode === 'orbit' && state.currentPlanet && (
-          <div className="absolute top-4 left-4 right-4 flex justify-between items-start z-30 animate-fade-in">
-            <div className="bg-gray-900/90 backdrop-blur-sm border border-gray-700/50 rounded-xl p-4">
-              <h3 className="text-blue-400 text-sm font-bold mb-2">ORBITING {state.currentPlanet.name.toUpperCase()}</h3>
-              <div className="space-y-1.5 text-xs">
-                <div className="flex justify-between gap-8">
-                  <span className="text-gray-500">Altitude</span>
-                  <span className="text-white">{Math.round(state.orbitAltitude)} km</span>
+              <div className="space-y-3 text-sm">
+                <div>
+                  <span className="text-gray-500 text-xs">Destination:</span>
+                  <span className="text-white ml-2">{selectedPlanet.name}</span>
                 </div>
-                <div className="flex justify-between gap-8">
-                  <span className="text-gray-500">Velocity</span>
-                  <span className="text-white">{ORBITAL_SPEEDS[state.currentPlanet.name] || '0'} km/s</span>
+                <div>
+                  <span className="text-gray-500 text-xs">Mission:</span>
+                  <p className="text-blue-300 mt-0.5">{selectedPlanet.mission}</p>
                 </div>
-                <div className="flex justify-between gap-8">
-                  <span className="text-gray-500">Landing Difficulty</span>
-                  <span className="text-yellow-400">{'●'.repeat(state.currentPlanet.difficulty)}{'○'.repeat(5 - state.currentPlanet.difficulty)}</span>
+                <div>
+                  <span className="text-gray-500 text-xs">Flight Difficulty:</span>
+                  <span className="text-yellow-400 ml-2">
+                    {'★'.repeat(selectedPlanet.difficulty)}{'☆'.repeat(5 - selectedPlanet.difficulty)}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-gray-500 text-xs">Estimated Fuel:</span>
+                  <span className={`ml-2 ${state.fuel < selectedPlanet.fuelCost ? 'text-red-400' : 'text-green-400'}`}>
+                    {selectedPlanet.fuelCost}%
+                  </span>
+                </div>
+                <div className="bg-gray-800/50 rounded-lg p-2">
+                  <span className="text-yellow-500 text-xs">⚠ Warning:</span>
+                  <span className="text-gray-400 text-xs ml-1">{selectedPlanet.atmosphere}</span>
                 </div>
               </div>
-            </div>
-            <button
-              onClick={beginLanding}
-              className="px-6 py-3 bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-500 hover:to-red-500 text-white font-bold rounded-lg transition-all hover:scale-105 active:scale-95 shadow-lg shadow-orange-600/30 animate-pulse-slow"
-            >
-              ↓ BEGIN LANDING
-            </button>
-          </div>
-        )}
 
-        {/* ============ LANDING HUD ============ */}
-        {state.mode === 'landing' && state.currentPlanet && (
-          <div className="absolute top-4 left-4 z-30 animate-fade-in">
-            <div className="bg-gray-900/90 backdrop-blur-sm border border-orange-700/50 rounded-xl p-4">
-              <h3 className="text-orange-400 text-sm font-bold mb-2">LANDING — {state.currentPlanet.name.toUpperCase()}</h3>
-              <div className="space-y-2">
-                <div>
-                  <div className="text-gray-500 text-xs mb-1">ALTITUDE</div>
-                  <div className="w-40 h-2 bg-gray-800 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-gradient-to-r from-green-500 to-yellow-500 transition-all"
-                      style={{ width: `${state.landingAltitude / 5}%` }}
-                    />
-                  </div>
-                  <div className="text-white text-xs mt-0.5">{Math.round(state.landingAltitude)} m</div>
-                </div>
-                <div>
-                  <div className="text-gray-500 text-xs mb-1">VERTICAL SPEED</div>
-                  <div className="text-orange-300 text-xs">-{Math.round(42 + state.landingProgress * 20)} m/s</div>
-                </div>
-                <div>
-                  <div className="text-gray-500 text-xs mb-1">STATUS</div>
-                  <div className="text-green-400 text-xs font-bold">
-                    {state.landingProgress < 0.9 ? 'DESCENDING...' : 'TOUCHDOWN!'}
-                  </div>
-                </div>
+              <div className="flex gap-2 mt-5">
+                <button
+                  onClick={launchMission}
+                  disabled={state.fuel < selectedPlanet.fuelCost}
+                  className="flex-1 py-2.5 bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 disabled:from-gray-700 disabled:to-gray-700 disabled:text-gray-500 text-white font-bold rounded-lg transition-all text-sm"
+                >
+                  {state.fuel < selectedPlanet.fuelCost ? 'LOW FUEL' : '🚀 LAUNCH MISSION'}
+                </button>
+                <button
+                  onClick={cancelBriefing}
+                  className="px-4 py-2.5 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded-lg transition-all text-sm"
+                >
+                  CANCEL
+                </button>
               </div>
             </div>
           </div>
         )}
 
-        {/* ============ LANDING COMPLETE ============ */}
-        {state.mode === 'landing' && state.landingProgress >= 1 && (
-          <div className="absolute inset-0 flex items-center justify-center z-40 animate-fade-in">
-            <div className="bg-gray-900/95 backdrop-blur-sm border border-green-700/50 rounded-xl p-6 text-center">
-              <div className="text-3xl mb-2">🛬</div>
-              <h3 className="text-green-400 text-lg font-bold mb-1">LANDED ON {state.currentPlanet?.name.toUpperCase()}</h3>
-              <p className="text-gray-400 text-xs mb-4">Systems nominal. Ready for exploration.</p>
-              <button
-                onClick={beginSurface}
-                className="px-6 py-2.5 bg-green-600 hover:bg-green-500 text-white font-bold rounded-lg transition-all hover:scale-105 active:scale-95"
-              >
-                BEGIN EXPLORATION →
-              </button>
+        {/* ============ LAUNCH HUD ============ */}
+        {state.mode === 'launch' && (
+          <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-30">
+            <div className="bg-gray-900/80 backdrop-blur-sm border border-orange-700/40 rounded-lg px-4 py-2 text-center">
+              <div className="text-orange-400 text-xs font-bold">
+                {state.launchPhase === 'countdown' && `T-${Math.ceil(state.launchCountdown)}`}
+                {state.launchPhase === 'ignition' && 'ENGINE IGNITION'}
+                {state.launchPhase === 'liftoff' && 'LIFTOFF!'}
+              </div>
             </div>
           </div>
         )}
 
-        {/* ============ SURFACE HUD ============ */}
-        {state.mode === 'surface' && state.currentPlanet && (
+        {/* ============ SPACE FLIGHT HUD ============ */}
+        {state.mode === 'space-flight' && (
           <>
-            {/* Mission panel */}
             <div className="absolute top-4 left-4 z-30">
-              <div className="bg-gray-900/90 backdrop-blur-sm border border-gray-700/50 rounded-xl p-4 max-w-xs">
-                <h3 className="text-white text-sm font-bold mb-1">
-                  📡 {state.currentPlanet.name.toUpperCase()}
-                </h3>
-                <div className="text-gray-400 text-xs mb-2">{state.currentPlanet.mission}</div>
-                <div className="flex items-center gap-2">
-                  <span className="text-gray-500 text-xs">PROGRESS</span>
-                  <div className="flex gap-1">
-                    {Array.from({ length: state.missionTarget }).map((_, i) => (
-                      <span
-                        key={i}
-                        className={`w-3 h-3 rounded-full border ${
-                          i < state.missionProgress
-                            ? 'bg-green-500 border-green-400'
-                            : 'bg-gray-800 border-gray-600'
-                        }`}
-                      />
-                    ))}
+              <div className="bg-gray-900/80 backdrop-blur-sm border border-blue-700/40 rounded-xl p-3">
+                <div className="text-blue-400 text-[10px] uppercase tracking-wider mb-2">Navigation</div>
+                <div className="space-y-1.5 text-xs">
+                  <HudRow label="Destination" value={state.currentPlanet?.name || ''} color="text-white" />
+                  <HudRow label="Distance" value={formatDistance(500000 * (1 - state.flightProgress))} color="text-blue-300" />
+                  <HudRow label="Speed" value={`${Math.round(50 + state.flightProgress * 200)} km/s`} color="text-cyan-300" />
+                </div>
+                <div className="mt-2">
+                  <div className="text-gray-500 text-[10px] mb-1">PROGRESS</div>
+                  <div className="w-36 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                    <div className="h-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all" style={{ width: `${state.flightProgress * 100}%` }} />
                   </div>
-                  <span className="text-white text-xs">{state.missionProgress}/{state.missionTarget}</span>
                 </div>
               </div>
             </div>
 
-            {/* Controls help */}
-            <div className="absolute bottom-4 left-4 z-30">
-              <div className="bg-gray-900/80 backdrop-blur-sm border border-gray-700/30 rounded-lg p-2.5 text-xs text-gray-500">
-                {mobileControls ? 'Use joystick to move • Tap SCAN to interact' : 'WASD/Arrows: Move • SPACE: Scan/Interact'}
+            {/* Right HUD */}
+            <div className="absolute top-4 right-4 z-30">
+              <div className="bg-gray-900/80 backdrop-blur-sm border border-gray-700/40 rounded-xl p-3">
+                <div className="space-y-1.5 text-xs">
+                  <BarRow label="FUEL" value={state.fuel} max={100} color="bg-green-500" />
+                  <BarRow label="HULL" value={state.hull} max={100} color="bg-cyan-500" />
+                </div>
               </div>
             </div>
 
-            {/* Mission complete overlay */}
-            {state.missionProgress >= state.missionTarget && (
-              <div className="absolute top-4 right-4 z-30 animate-fade-in">
-                <div className="bg-gray-900/95 backdrop-blur-sm border border-yellow-600/50 rounded-xl p-4">
-                  <div className="text-yellow-400 text-sm font-bold mb-1">🏆 MISSION COMPLETE!</div>
-                  <div className="text-green-400 text-xs mb-2">+250 Research Points</div>
-                  <div className="text-gray-400 text-xs">Return to ship to take off</div>
-                </div>
+            {/* Controls hint */}
+            {!isMobile && (
+              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20">
+                <div className="text-gray-600 text-[10px]">WASD to adjust position</div>
               </div>
             )}
           </>
         )}
 
-        {/* ============ TRAVEL HUD ============ */}
-        {(state.mode === 'travel' || state.mode === 'return-travel') && state.currentPlanet && (
-          <div className="absolute top-4 left-4 z-30 animate-fade-in">
-            <div className="bg-gray-900/90 backdrop-blur-sm border border-blue-700/50 rounded-xl p-4">
-              <h3 className="text-blue-400 text-sm font-bold mb-2">
-                {state.mode === 'travel' ? `→ TRAVELING TO ${state.currentPlanet.name.toUpperCase()}` : '→ RETURNING TO EARTH'}
-              </h3>
-              <div className="w-48 h-2 bg-gray-800 rounded-full overflow-hidden mb-2">
-                <div
-                  className="h-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all"
-                  style={{ width: `${state.travelProgress * 100}%` }}
-                />
+        {/* ============ APPROACH HUD ============ */}
+        {state.mode === 'approach' && state.currentPlanet && (
+          <div className="absolute top-4 left-4 z-30">
+            <div className="bg-gray-900/80 backdrop-blur-sm border border-gray-700/40 rounded-xl p-3">
+              <div className="text-white text-xs font-bold mb-1">APPROACHING {state.currentPlanet.name.toUpperCase()}</div>
+              <div className="text-blue-300 text-xs">{formatDistance(state.approachDistance)}</div>
+            </div>
+          </div>
+        )}
+
+        {/* ============ ORBIT HUD ============ */}
+        {state.mode === 'orbit' && state.currentPlanet && (
+          <>
+            <div className="absolute top-4 left-4 z-30">
+              <div className="bg-gray-900/80 backdrop-blur-sm border border-blue-700/40 rounded-xl p-3">
+                <div className="text-blue-400 text-[10px] uppercase tracking-wider mb-2">{state.currentPlanet.name} Orbit</div>
+                <div className="space-y-1.5 text-xs">
+                  <HudRow label="Altitude" value={`${Math.round(state.orbitRadius)} km`} color="text-white" />
+                  <HudRow label="Velocity" value="3.4 km/s" color="text-cyan-300" />
+                  <HudRow label="Fuel" value={`${Math.round(state.fuel)}%`} color="text-green-400" />
+                </div>
+                <div className="mt-2 pt-2 border-t border-gray-700/50">
+                  <div className="text-green-400 text-[10px]">● LANDING WINDOW AVAILABLE</div>
+                </div>
               </div>
-              <div className="text-gray-400 text-xs">
-                Progress: {Math.round(state.travelProgress * 100)}%
-              </div>
-              <div className="text-gray-500 text-xs mt-1">
-                Speed: {Math.round(100 + state.travelProgress * 200)} km/s
+            </div>
+
+            <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-30 flex gap-3">
+              <button
+                onClick={beginLanding}
+                className="px-6 py-2.5 bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-500 hover:to-red-500 text-white font-bold rounded-lg transition-all hover:scale-105 active:scale-95 shadow-lg shadow-orange-600/20 text-sm"
+              >
+                ↓ BEGIN LANDING
+              </button>
+              <button
+                onClick={continueOrbit}
+                className="px-4 py-2.5 bg-gray-800/80 hover:bg-gray-700/80 text-gray-400 rounded-lg transition-all text-sm"
+              >
+                CONTINUE ORBIT
+              </button>
+            </div>
+          </>
+        )}
+
+        {/* ============ LANDING HUD ============ */}
+        {state.mode === 'landing' && state.currentPlanet && (
+          <div className="absolute top-4 left-4 z-30">
+            <div className="bg-gray-900/80 backdrop-blur-sm border border-orange-700/40 rounded-xl p-3">
+              <div className="text-orange-400 text-[10px] uppercase tracking-wider mb-2">Landing — {state.currentPlanet.name}</div>
+              <div className="space-y-1.5">
+                <div>
+                  <div className="text-gray-500 text-[10px]">PHASE</div>
+                  <div className="text-white text-xs font-bold uppercase">{state.landingPhase}</div>
+                </div>
+                <div>
+                  <div className="text-gray-500 text-[10px]">ALTITUDE</div>
+                  <div className="w-32 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                    <div className="h-full bg-gradient-to-r from-green-500 to-yellow-500 transition-all" style={{ width: `${Math.min(100, state.landingAltitude / 1000)}%` }} />
+                  </div>
+                  <div className="text-white text-[10px] mt-0.5">{formatAltitude(state.landingAltitude)}</div>
+                </div>
               </div>
             </div>
           </div>
         )}
 
-        {/* ============ RETURN ORBIT ============ */}
-        {state.mode === 'return-orbit' && (
-          <div className="absolute top-4 left-4 z-30 animate-fade-in">
-            <div className="bg-gray-900/90 backdrop-blur-sm border border-gray-700/50 rounded-xl p-4">
-              <h3 className="text-blue-400 text-sm font-bold">DEPARTING ORBIT</h3>
-              <div className="text-gray-400 text-xs mt-1">Setting course for Earth...</div>
+        {/* ============ SURFACE HUD ============ */}
+        {(state.mode === 'surface' || state.mode === 'mission-complete') && state.currentPlanet && (
+          <>
+            {/* Mission panel */}
+            <div className="absolute top-4 left-4 z-30">
+              <div className="bg-gray-900/80 backdrop-blur-sm border border-gray-700/40 rounded-xl p-3 max-w-[220px]">
+                <div className="text-white text-[10px] uppercase tracking-wider mb-1">Mission</div>
+                <div className="text-gray-300 text-xs mb-2">{state.currentPlanet.mission}</div>
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-500 text-[10px]">Progress</span>
+                  <div className="flex gap-1">
+                    {Array.from({ length: state.missionTarget }).map((_, i) => (
+                      <span
+                        key={i}
+                        className={`w-2.5 h-2.5 rounded-full border ${
+                          i < state.missionProgress ? 'bg-green-500 border-green-400' : 'bg-gray-800 border-gray-600'
+                        }`}
+                      />
+                    ))}
+                  </div>
+                </div>
+                {nearestUnscanned && state.mode === 'surface' && (
+                  <div className="mt-2 pt-2 border-t border-gray-700/40">
+                    <div className="text-gray-500 text-[10px]">Nearest Target</div>
+                    <div className="text-blue-300 text-xs">{nearestUnscanned.label} — {nearestDist}m</div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Stats */}
+            <div className="absolute top-4 right-4 z-30">
+              <div className="bg-gray-900/80 backdrop-blur-sm border border-gray-700/40 rounded-xl p-3">
+                <div className="space-y-1 text-xs">
+                  <HudRow label="Research" value={state.researchPoints.toString()} color="text-yellow-400" />
+                  <HudRow label="Fuel" value={`${Math.round(state.fuel)}%`} color="text-green-400" />
+                </div>
+              </div>
+            </div>
+
+            {/* Controls hint */}
+            {!isMobile && (
+              <div className="absolute bottom-4 left-4 z-20">
+                <div className="text-gray-600 text-[10px]">WASD: Move • SPACE: Interact</div>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ============ MISSION COMPLETE OVERLAY ============ */}
+        {state.mode === 'mission-complete' && (
+          <div className="absolute top-1/3 left-1/2 -translate-x-1/2 z-40 animate-fade-in">
+            <div className="bg-gray-900/95 backdrop-blur-sm border border-yellow-600/50 rounded-xl p-5 text-center">
+              <div className="text-2xl mb-1">🏆</div>
+              <h3 className="text-yellow-400 font-bold text-sm">MISSION COMPLETE</h3>
+              <p className="text-gray-400 text-xs mt-1">{state.currentPlanet?.name} survey complete.</p>
+              <p className="text-green-400 text-xs mt-1">+300 bonus RP on return</p>
+              <button
+                onClick={returnFromComplete}
+                className="mt-3 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white text-xs rounded-lg transition-all"
+              >
+                RETURN TO LANDER →
+              </button>
             </div>
           </div>
         )}
 
-        {/* ============ GLOBAL HUD (always visible except intro) ============ */}
-        {state.mode !== 'intro' && (
+        {/* ============ TAKEOFF HUD ============ */}
+        {state.mode === 'takeoff' && (
+          <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-30">
+            <div className="bg-gray-900/80 backdrop-blur-sm border border-orange-700/40 rounded-lg px-4 py-2 text-center">
+              <div className="text-orange-400 text-xs font-bold">TAKING OFF...</div>
+            </div>
+          </div>
+        )}
+
+        {/* ============ RETURNING HUD ============ */}
+        {state.mode === 'returning' && (
+          <div className="absolute top-4 left-4 z-30">
+            <div className="bg-gray-900/80 backdrop-blur-sm border border-blue-700/40 rounded-xl p-3">
+              <div className="text-blue-400 text-xs font-bold">RETURNING TO SOLAR SYSTEM</div>
+              <div className="w-32 h-1.5 bg-gray-800 rounded-full overflow-hidden mt-2">
+                <div className="h-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all" style={{ width: `${state.flightProgress * 100}%` }} />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ============ GLOBAL HUD ============ */}
+        {state.mode !== 'menu' && state.mode !== 'solar-system' && state.mode !== 'briefing' && (
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40">
-            <div className="bg-gray-900/80 backdrop-blur-sm border border-gray-700/30 rounded-full px-5 py-2 flex items-center gap-4 text-xs">
-              <HudItem label="RESEARCH" value={state.researchPoints.toString()} color="text-yellow-400" />
-              <div className="w-px h-4 bg-gray-700" />
-              <HudItem label="PLANETS" value={`${state.visitedPlanets.length}/8`} color="text-blue-400" />
-              <div className="w-px h-4 bg-gray-700" />
-              <HudItem label="FUEL" value={`${Math.round(state.fuel)}%`} color={state.fuel < 20 ? 'text-red-400' : 'text-green-400'} />
-              <div className="w-px h-4 bg-gray-700" />
-              <HudItem label="HULL" value={`${Math.round(state.hull)}%`} color="text-cyan-400" />
+            <div className="bg-gray-900/70 backdrop-blur-sm border border-gray-700/30 rounded-full px-4 py-1.5 flex items-center gap-3 text-[10px]">
+              <span className="text-gray-500">RP</span>
+              <span className="text-yellow-400 font-bold">{state.researchPoints}</span>
+              <div className="w-px h-3 bg-gray-700" />
+              <span className="text-gray-500">FUEL</span>
+              <span className={`font-bold ${state.fuel < 20 ? 'text-red-400' : 'text-green-400'}`}>{Math.round(state.fuel)}%</span>
+              <div className="w-px h-3 bg-gray-700" />
+              <span className="text-gray-500">HULL</span>
+              <span className="text-cyan-400 font-bold">{Math.round(state.hull)}%</span>
             </div>
           </div>
         )}
 
         {/* ============ MESSAGE ============ */}
         {state.message && (
-          <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 animate-fade-in">
-            <div className="bg-gray-900/95 backdrop-blur-sm border border-green-600/50 rounded-lg px-4 py-2 text-green-400 text-sm font-medium shadow-lg">
+          <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 animate-fade-in">
+            <div className={`backdrop-blur-sm border rounded-lg px-4 py-2 text-sm font-medium shadow-lg ${
+              state.messageType === 'success' ? 'bg-gray-900/90 border-green-600/50 text-green-400' :
+              state.messageType === 'warning' ? 'bg-gray-900/90 border-yellow-600/50 text-yellow-400' :
+              'bg-gray-900/90 border-blue-600/50 text-blue-300'
+            }`}>
               {state.message}
             </div>
           </div>
         )}
 
         {/* ============ MOBILE CONTROLS ============ */}
-        {mobileControls && state.mode === 'surface' && (
-          <div className="absolute bottom-20 right-4 z-40">
-            <div className="grid grid-cols-3 gap-1 w-36">
+        {isMobile && (state.mode === 'surface' || state.mode === 'mission-complete') && (
+          <div className="absolute bottom-6 right-4 z-40">
+            <div className="grid grid-cols-3 gap-1 w-32">
               <div />
-              <button
-                onTouchStart={() => handleTouch('up', true)}
-                onTouchEnd={() => handleTouch('up', false)}
-                className="w-11 h-11 bg-gray-800/80 rounded-lg flex items-center justify-center text-white text-lg active:bg-gray-700"
-              >
-                ↑
-              </button>
+              <MobileBtn label="↑" onPress={() => setMobileKey('up', true)} onRelease={() => setMobileKey('up', false)} />
               <div />
-              <button
-                onTouchStart={() => handleTouch('left', true)}
-                onTouchEnd={() => handleTouch('left', false)}
-                className="w-11 h-11 bg-gray-800/80 rounded-lg flex items-center justify-center text-white text-lg active:bg-gray-700"
-              >
-                ←
-              </button>
-              <button
-                onTouchStart={() => handleTouch('space', true)}
-                onTouchEnd={() => handleTouch('space', false)}
-                className="w-11 h-11 bg-blue-700/80 rounded-lg flex items-center justify-center text-white text-xs font-bold active:bg-blue-600"
-              >
-                SCAN
-              </button>
-              <button
-                onTouchStart={() => handleTouch('right', true)}
-                onTouchEnd={() => handleTouch('right', false)}
-                className="w-11 h-11 bg-gray-800/80 rounded-lg flex items-center justify-center text-white text-lg active:bg-gray-700"
-              >
-                →
-              </button>
+              <MobileBtn label="←" onPress={() => setMobileKey('left', true)} onRelease={() => setMobileKey('left', false)} />
+              <MobileBtn label="●" onPress={() => {
+                setMobileKey('space', true);
+                if (state.nearTarget && !state.nearTarget.scanned) scanTarget();
+                else if (state.nearLander && state.missionProgress >= state.missionTarget) boardShip();
+              }} onRelease={() => setMobileKey('space', false)} highlight />
+              <MobileBtn label="→" onPress={() => setMobileKey('right', true)} onRelease={() => setMobileKey('right', false)} />
               <div />
-              <button
-                onTouchStart={() => handleTouch('down', true)}
-                onTouchEnd={() => handleTouch('down', false)}
-                className="w-11 h-11 bg-gray-800/80 rounded-lg flex items-center justify-center text-white text-lg active:bg-gray-700"
-              >
-                ↓
-              </button>
+              <MobileBtn label="↓" onPress={() => setMobileKey('down', true)} onRelease={() => setMobileKey('down', false)} />
               <div />
             </div>
           </div>
@@ -440,20 +566,64 @@ export default function App() {
 // SUB-COMPONENTS
 // ============================================================
 
-function HudItem({ label, value, color }: { label: string; value: string; color: string }) {
+function HudRow({ label, value, color }: { label: string; value: string; color: string }) {
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex justify-between gap-4">
       <span className="text-gray-500">{label}</span>
-      <span className={`font-bold ${color}`}>{value}</span>
+      <span className={`font-medium ${color}`}>{value}</span>
     </div>
   );
 }
 
-function StatBox({ label, value }: { label: string; value: string }) {
+function MiniStat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="bg-gray-800/40 rounded-lg p-2">
-      <div className="text-gray-500 text-[10px]">{label}</div>
-      <div className="text-white text-xs font-medium truncate">{value}</div>
+    <div className="bg-gray-800/30 rounded p-1.5">
+      <div className="text-gray-500 text-[9px]">{label}</div>
+      <div className="text-white text-[10px] font-medium truncate">{value}</div>
     </div>
   );
+}
+
+function BarRow({ label, value, max, color }: { label: string; value: number; max: number; color: string }) {
+  const pct = (value / max) * 100;
+  return (
+    <div>
+      <div className="flex justify-between gap-3">
+        <span className="text-gray-500 text-[10px]">{label}</span>
+        <span className="text-white text-[10px]">{Math.round(value)}%</span>
+      </div>
+      <div className="w-24 h-1 bg-gray-800 rounded-full overflow-hidden mt-0.5">
+        <div className={`h-full ${color} transition-all`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function MobileBtn({ label, onPress, onRelease, highlight }: { label: string; onPress: () => void; onRelease: () => void; highlight?: boolean }) {
+  return (
+    <button
+      onTouchStart={(e) => { e.preventDefault(); onPress(); }}
+      onTouchEnd={(e) => { e.preventDefault(); onRelease(); }}
+      className={`w-10 h-10 rounded-lg flex items-center justify-center text-white text-sm active:scale-95 transition-transform ${
+        highlight ? 'bg-blue-600/80' : 'bg-gray-800/80'
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+function formatDistance(km: number): string {
+  if (km >= 1000000) return `${(km / 1000000).toFixed(1)}M km`;
+  if (km >= 1000) return `${(km / 1000).toFixed(0)}K km`;
+  return `${Math.round(km)} km`;
+}
+
+function formatAltitude(m: number): string {
+  if (m >= 1000) return `${(m / 1000).toFixed(1)} km`;
+  return `${Math.round(m)} m`;
 }

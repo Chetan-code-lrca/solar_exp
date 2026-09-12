@@ -2,95 +2,72 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   GameState,
   GameMode,
-  KeyState,
   Planet,
-  ScanLocation,
+  ScanTarget,
   Particle,
-  planets,
+  PLANETS,
   createInitialState,
 } from './types';
 
-// Generate scan locations for a planet surface
-function generateScanLocations(planet: Planet, worldW: number, worldH: number): ScanLocation[] {
-  const locations: ScanLocation[] = [];
+interface Keys {
+  up: boolean;
+  down: boolean;
+  left: boolean;
+  right: boolean;
+  space: boolean;
+}
+
+// Seeded random for terrain
+function seededRandom(seed: number): () => number {
+  let s = seed;
+  return () => {
+    s = (s * 16807) % 2147483647;
+    return (s - 1) / 2147483646;
+  };
+}
+
+function generateScanTargets(planet: Planet, worldW: number, worldH: number, seed: number): ScanTarget[] {
+  const rng = seededRandom(seed);
+  const targets: ScanTarget[] = [];
   const labels = planet.missionType === 'atmosphere'
     ? ['Data Point Alpha', 'Data Point Beta', 'Data Point Gamma']
     : planet.missionType === 'rings'
     ? ['Ring Sector A', 'Ring Sector B', 'Ring Sector C']
     : ['Sample Site Alpha', 'Sample Site Beta', 'Sample Site Gamma'];
 
+  const types: ('sample' | 'formation' | 'reading' | 'probe')[] =
+    planet.missionType === 'atmosphere' ? ['reading', 'reading', 'reading']
+    : planet.missionType === 'rings' ? ['sample', 'sample', 'sample']
+    : ['sample', 'formation', 'sample'];
+
+  const cx = worldW / 2;
+  const cy = worldH / 2;
+
   for (let i = 0; i < 3; i++) {
     let x: number, y: number;
     let attempts = 0;
     do {
-      x = 200 + Math.random() * (worldW - 400);
-      y = 200 + Math.random() * (worldH - 400);
+      const angle = rng() * Math.PI * 2;
+      const dist = 300 + rng() * 600;
+      x = cx + Math.cos(angle) * dist;
+      y = cy + Math.sin(angle) * dist;
       attempts++;
     } while (
       attempts < 50 &&
-      locations.some(l => Math.hypot(l.x - x, l.y - y) < 300)
+      (x < 100 || x > worldW - 100 || y < 100 || y > worldH - 100 ||
+       targets.some(t => Math.hypot(t.x - x, t.y - y) < 350))
     );
-    locations.push({ x, y, scanned: false, label: labels[i] });
+    targets.push({ id: i, x, y, scanned: false, label: labels[i], type: types[i] });
   }
-  return locations;
+  return targets;
 }
 
-// Generate terrain features for a planet
-export interface TerrainFeature {
-  x: number;
-  y: number;
-  type: 'rock' | 'crater' | 'volcano' | 'cloud' | 'tree' | 'ice';
-  size: number;
-  color: string;
+function easeInOut(t: number): number {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
 
-export function generateTerrain(planet: Planet, worldW: number, worldH: number): TerrainFeature[] {
-  const features: TerrainFeature[] = [];
-  const count = planet.hasSolidSurface ? 40 : 30;
-
-  for (let i = 0; i < count; i++) {
-    const x = Math.random() * worldW;
-    const y = Math.random() * worldH;
-    const colorIdx = Math.floor(Math.random() * planet.featureColors.length);
-
-    if (!planet.hasSolidSurface) {
-      features.push({
-        x, y,
-        type: 'cloud',
-        size: 30 + Math.random() * 80,
-        color: planet.featureColors[colorIdx],
-      });
-    } else if (planet.name === 'Mercury' || planet.name === 'Mars') {
-      features.push({
-        x, y,
-        type: Math.random() > 0.5 ? 'crater' : 'rock',
-        size: 10 + Math.random() * 40,
-        color: planet.featureColors[colorIdx],
-      });
-    } else if (planet.name === 'Venus') {
-      features.push({
-        x, y,
-        type: Math.random() > 0.6 ? 'volcano' : 'rock',
-        size: 15 + Math.random() * 35,
-        color: planet.featureColors[colorIdx],
-      });
-    } else if (planet.name === 'Earth') {
-      features.push({
-        x, y,
-        type: Math.random() > 0.5 ? 'tree' : 'rock',
-        size: 10 + Math.random() * 25,
-        color: planet.featureColors[colorIdx],
-      });
-    } else {
-      features.push({
-        x, y,
-        type: 'rock',
-        size: 10 + Math.random() * 30,
-        color: planet.featureColors[colorIdx],
-      });
-    }
-  }
-  return features;
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
 }
 
 export function useGame() {
@@ -98,29 +75,14 @@ export function useGame() {
   const stateRef = useRef(state);
   stateRef.current = state;
 
-  const keysRef = useRef<KeyState>({
-    up: false, down: false, left: false, right: false, space: false,
-  });
-  const terrainRef = useRef<TerrainFeature[]>([]);
-  const starsRef = useRef<{ x: number; y: number; size: number; brightness: number }[]>([]);
+  const keysRef = useRef<Keys>({ up: false, down: false, left: false, right: false, space: false });
   const lastTimeRef = useRef(0);
-  const rafRef = useRef<number>(0);
-  const canvasSizeRef = useRef({ w: 800, h: 600 });
+  const rafRef = useRef(0);
+  const canvasRef = useRef<{ w: number; h: number }>({ w: 800, h: 600 });
 
-  // Generate stars once
+  // Keyboard
   useEffect(() => {
-    const stars = Array.from({ length: 300 }, () => ({
-      x: Math.random() * 4000 - 2000,
-      y: Math.random() * 4000 - 2000,
-      size: Math.random() * 2 + 0.5,
-      brightness: Math.random() * 0.7 + 0.3,
-    }));
-    starsRef.current = stars;
-  }, []);
-
-  // Keyboard handlers
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
+    const down = (e: KeyboardEvent) => {
       const k = keysRef.current;
       switch (e.key.toLowerCase()) {
         case 'w': case 'arrowup': k.up = true; e.preventDefault(); break;
@@ -130,7 +92,7 @@ export function useGame() {
         case ' ': k.space = true; e.preventDefault(); break;
       }
     };
-    const handleKeyUp = (e: KeyboardEvent) => {
+    const up = (e: KeyboardEvent) => {
       const k = keysRef.current;
       switch (e.key.toLowerCase()) {
         case 'w': case 'arrowup': k.up = false; break;
@@ -140,22 +102,18 @@ export function useGame() {
         case ' ': k.space = false; break;
       }
     };
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-    };
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
   }, []);
 
   // Game loop
   useEffect(() => {
-    const loop = (timestamp: number) => {
-      if (!lastTimeRef.current) lastTimeRef.current = timestamp;
-      const dt = Math.min((timestamp - lastTimeRef.current) / 1000, 0.1);
-      lastTimeRef.current = timestamp;
-
-      setState(prev => updateGame(prev, dt, keysRef.current, canvasSizeRef.current));
+    const loop = (ts: number) => {
+      if (!lastTimeRef.current) lastTimeRef.current = ts;
+      const dt = Math.min((ts - lastTimeRef.current) / 1000, 0.1);
+      lastTimeRef.current = ts;
+      setState(prev => tick(prev, dt, keysRef.current, canvasRef.current));
       rafRef.current = requestAnimationFrame(loop);
     };
     rafRef.current = requestAnimationFrame(loop);
@@ -163,426 +121,611 @@ export function useGame() {
   }, []);
 
   const setCanvasSize = useCallback((w: number, h: number) => {
-    canvasSizeRef.current = { w, h };
+    canvasRef.current = { w, h };
   }, []);
 
+  // Actions
   const beginExpedition = useCallback(() => {
-    setState(prev => ({ ...prev, mode: 'solar-system', showIntro: false }));
+    setState(p => ({ ...p, mode: 'solar-system', modeTimer: 0 }));
   }, []);
 
-  const selectPlanet = useCallback((index: number) => {
-    setState(prev => ({ ...prev, selectedPlanetIndex: index }));
+  const selectPlanet = useCallback((idx: number) => {
+    setState(p => ({ ...p, selectedPlanetIndex: idx }));
+  }, []);
+
+  const openBriefing = useCallback(() => {
+    setState(p => {
+      if (p.selectedPlanetIndex === null) return p;
+      return { ...p, mode: 'briefing', modeTimer: 0 };
+    });
+  }, []);
+
+  const cancelBriefing = useCallback(() => {
+    setState(p => ({ ...p, mode: 'solar-system', modeTimer: 0 }));
   }, []);
 
   const launchMission = useCallback(() => {
-    setState(prev => {
-      if (prev.selectedPlanetIndex === null) return prev;
-      const planet = planets[prev.selectedPlanetIndex];
-      const angle = prev.planetAngles[prev.selectedPlanetIndex];
-      const targetX = Math.cos(angle) * planet.orbitRadius;
-      const targetY = Math.sin(angle) * planet.orbitRadius;
-
+    setState(p => {
+      if (p.selectedPlanetIndex === null) return p;
+      const planet = PLANETS[p.selectedPlanetIndex];
+      if (p.fuel < planet.fuelCost) return p;
+      const seed = Math.random() * 10000;
       return {
-        ...prev,
+        ...p,
         mode: 'launch' as GameMode,
-        currentPlanet: planet,
-        travelStartX: prev.shipX,
-        travelStartY: prev.shipY,
-        travelEndX: targetX,
-        travelEndY: targetY,
-        travelProgress: 0,
         modeTimer: 0,
+        currentPlanet: planet,
+        launchCountdown: 3,
+        launchPhase: 'countdown' as const,
+        fuel: p.fuel - planet.fuelCost,
         missionProgress: 0,
         missionTarget: 3,
-        scanLocations: generateScanLocations(planet, prev.surfaceWorldWidth, prev.surfaceWorldHeight),
-        fuel: Math.max(0, prev.fuel - (planet.difficulty * 5)),
+        scanTargets: generateScanTargets(planet, p.worldWidth, p.worldHeight, seed),
+        terrainSeed: seed,
+        landingPhase: 'deorbit' as const,
+        landingAltitude: 100000,
       };
     });
-    terrainRef.current = [];
   }, []);
 
   const beginLanding = useCallback(() => {
-    setState(prev => ({
-      ...prev,
-      mode: 'landing',
-      landingAltitude: 500,
-      landingProgress: 0,
-      modeTimer: 0,
-    }));
+    setState(p => ({ ...p, mode: 'landing', modeTimer: 0, landingPhase: 'deorbit', landingAltitude: 100000 }));
+  }, []);
+
+  const continueOrbit = useCallback(() => {
+    setState(p => ({ ...p, modeTimer: 0 })); // reset timer, stay in orbit
   }, []);
 
   const beginSurface = useCallback(() => {
-    setState(prev => {
-      const planet = prev.currentPlanet;
-      if (!planet) return prev;
-      terrainRef.current = generateTerrain(planet, prev.surfaceWorldWidth, prev.surfaceWorldHeight);
-      const shipX = prev.surfaceWorldWidth / 2;
-      const shipY = prev.surfaceWorldHeight / 2;
+    setState(p => ({
+      ...p,
+      mode: 'surface',
+      modeTimer: 0,
+      playerX: p.landerX,
+      playerY: p.landerY + 80,
+      playerVX: 0,
+      playerVY: 0,
+      playerAngle: -Math.PI / 2,
+    }));
+  }, []);
+
+  const boardShip = useCallback(() => {
+    setState(p => ({ ...p, mode: 'takeoff', modeTimer: 0 }));
+  }, []);
+
+  const scanTarget = useCallback(() => {
+    setState(p => {
+      if (!p.nearTarget || p.nearTarget.scanned) return p;
+      const newTargets = p.scanTargets.map(t =>
+        t.id === p.nearTarget!.id ? { ...t, scanned: true } : t
+      );
+      const newProgress = p.missionProgress + 1;
+      const complete = newProgress >= p.missionTarget;
       return {
-        ...prev,
-        mode: 'surface',
-        playerX: shipX,
-        playerY: shipY + 60,
-        playerAngle: 0,
-        shipSurfaceX: shipX,
-        shipSurfaceY: shipY,
-        nearShip: true,
-        modeTimer: 0,
+        ...p,
+        scanTargets: newTargets,
+        missionProgress: newProgress,
+        nearTarget: null,
+        message: complete
+          ? `MISSION COMPLETE — Return to lander!`
+          : `+100 RP — ${p.nearTarget.label} scanned!`,
+        messageTimer: 3,
+        messageType: complete ? 'success' : 'info',
+        researchPoints: p.researchPoints + 100,
+        mode: complete ? 'mission-complete' : 'surface',
       };
     });
   }, []);
 
-  const returnToShip = useCallback(() => {
-    setState(prev => ({
-      ...prev,
-      mode: 'return-orbit',
-      modeTimer: 0,
-      orbitAngle: 0,
-      orbitAltitude: 60,
-    }));
+  const returnFromComplete = useCallback(() => {
+    setState(p => ({ ...p, mode: 'surface', modeTimer: 0, message: 'Return to the lander to take off.', messageTimer: 3, messageType: 'info' as const }));
   }, []);
 
-  const takeOff = useCallback(() => {
-    setState(prev => ({
-      ...prev,
-      mode: 'return-orbit',
-      modeTimer: 0,
-      orbitAngle: 0,
-      orbitAltitude: 60,
-    }));
-  }, []);
-
-  const returnToSolarSystem = useCallback(() => {
-    setState(prev => {
-      const newCompleted = prev.currentPlanet && prev.missionProgress >= prev.missionTarget
-        ? [...prev.completedMissions, prev.currentPlanet.name]
-        : prev.completedMissions;
-      const newVisited = prev.currentPlanet && !prev.visitedPlanets.includes(prev.currentPlanet.name)
-        ? [...prev.visitedPlanets, prev.currentPlanet.name]
-        : prev.visitedPlanets;
-      const points = prev.currentPlanet && prev.missionProgress >= prev.missionTarget
-        ? prev.researchPoints + 250
-        : prev.researchPoints + 50;
-
+  const finishReturn = useCallback(() => {
+    setState(p => {
+      const cp = p.currentPlanet;
+      const newVisited = cp && !p.visitedPlanets.includes(cp.name) ? [...p.visitedPlanets, cp.name] : p.visitedPlanets;
+      const newCompleted = cp && p.missionProgress >= p.missionTarget && !p.completedMissions.includes(cp.name)
+        ? [...p.completedMissions, cp.name] : p.completedMissions;
+      const bonus = cp && p.missionProgress >= p.missionTarget ? 300 : 0;
       return {
-        ...prev,
+        ...p,
         mode: 'solar-system',
+        modeTimer: 0,
         currentPlanet: null,
         selectedPlanetIndex: null,
-        completedMissions: newCompleted,
         visitedPlanets: newVisited,
-        researchPoints: points,
-        modeTimer: 0,
+        completedMissions: newCompleted,
+        researchPoints: p.researchPoints + bonus,
+        shipSolarX: 0,
+        shipSolarY: 145,
       };
     });
   }, []);
 
-  const showMessage = useCallback((msg: string) => {
-    setState(prev => ({ ...prev, message: msg, messageTimer: 3 }));
+  const setMobileKey = useCallback((key: keyof Keys, val: boolean) => {
+    keysRef.current[key] = val;
   }, []);
 
   return {
     state,
     stateRef,
-    terrainRef,
-    starsRef,
-    canvasSizeRef,
+    canvasRef,
     setCanvasSize,
+    keysRef,
     beginExpedition,
     selectPlanet,
+    openBriefing,
+    cancelBriefing,
     launchMission,
     beginLanding,
+    continueOrbit,
     beginSurface,
-    returnToShip,
-    takeOff,
-    returnToSolarSystem,
-    showMessage,
-    keysRef,
+    boardShip,
+    scanTarget,
+    returnFromComplete,
+    finishReturn,
+    setMobileKey,
   };
 }
 
 // ============================================================
-// GAME UPDATE LOGIC
+// GAME TICK
 // ============================================================
 
-function updateGame(state: GameState, dt: number, keys: KeyState, canvasSize: { w: number; h: number }): GameState {
-  const s = { ...state };
-  s.modeTimer += dt;
-  s.particles = updateParticles(s.particles, dt);
-
-  // Always update planet angles in solar system mode
-  if (s.mode === 'solar-system') {
-    s.planetAngles = s.planetAngles.map((angle, i) => {
-      const speed = 0.3 / (i + 1);
-      return angle + speed * dt;
-    });
-  }
+function tick(s: GameState, dt: number, keys: Keys, canvas: { w: number; h: number }): GameState {
+  const n = { ...s };
+  n.modeTimer += dt;
 
   // Message timer
-  if (s.messageTimer > 0) {
-    s.messageTimer -= dt;
-    if (s.messageTimer <= 0) {
-      s.message = '';
-      s.messageTimer = 0;
-    }
+  if (n.messageTimer > 0) {
+    n.messageTimer -= dt;
+    if (n.messageTimer <= 0) { n.message = ''; n.messageTimer = 0; }
   }
 
-  switch (s.mode) {
-    case 'launch':
-      return updateLaunch(s, dt);
-    case 'travel':
-      return updateTravel(s, dt);
-    case 'orbit':
-      return updateOrbit(s, dt);
-    case 'landing':
-      return updateLanding(s, dt);
-    case 'surface':
-      return updateSurface(s, dt, keys, canvasSize);
-    case 'return-travel':
-      return updateReturnTravel(s, dt);
-    case 'return-orbit':
-      return updateReturnOrbit(s, dt);
-    default:
-      return s;
+  // Particles
+  n.particles = n.particles
+    .map(p => ({ ...p, x: p.x + p.vx * dt, y: p.y + p.vy * dt, life: p.life - dt, vy: p.vy + (p.type === 'dust' ? 20 : 0) * dt }))
+    .filter(p => p.life > 0)
+    .slice(-150);
+
+  // Planet angles always update in solar system
+  if (n.mode === 'solar-system') {
+    n.planetAngles = n.planetAngles.map((a, i) => a + (0.2 / (i + 1)) * dt);
+  }
+
+  // Camera smoothing
+  n.cameraX = lerp(n.cameraX, n.targetCameraX, dt * 3);
+  n.cameraY = lerp(n.cameraY, n.targetCameraY, dt * 3);
+  n.cameraZoom = lerp(n.cameraZoom, n.targetCameraZoom, dt * 3);
+
+  switch (n.mode) {
+    case 'menu': return tickMenu(n, dt);
+    case 'solar-system': return tickSolarSystem(n, dt, keys);
+    case 'briefing': return n;
+    case 'launch': return tickLaunch(n, dt, canvas);
+    case 'space-flight': return tickSpaceFlight(n, dt, keys, canvas);
+    case 'approach': return tickApproach(n, dt, canvas);
+    case 'orbit': return tickOrbit(n, dt);
+    case 'landing': return tickLanding(n, dt, canvas);
+    case 'surface': return tickSurface(n, dt, keys, canvas);
+    case 'mission-complete': return n;
+    case 'takeoff': return tickTakeoff(n, dt, canvas);
+    case 'returning': return tickReturning(n, dt);
+    default: return n;
   }
 }
 
-function updateLaunch(s: GameState, dt: number): GameState {
-  // Launch animation: 2 seconds then travel
-  if (s.modeTimer > 2) {
-    s.mode = 'travel';
-    s.modeTimer = 0;
-    s.travelProgress = 0;
-  }
-  // Add engine particles
-  if (Math.random() > 0.3) {
-    s.particles = addExhaustParticle(s.particles, s.shipX, s.shipY + 15, s.shipAngle);
+function tickMenu(s: GameState, _dt: number): GameState { return s; }
+
+function tickSolarSystem(s: GameState, _dt: number, _keys: Keys): GameState {
+  // Ship idles near Earth
+  const earthAngle = s.planetAngles[2];
+  s.shipSolarX = Math.cos(earthAngle) * PLANETS[2].orbitRadius;
+  s.shipSolarY = Math.sin(earthAngle) * PLANETS[2].orbitRadius;
+  s.shipSolarAngle = earthAngle + Math.PI / 2;
+  return s;
+}
+
+function tickLaunch(s: GameState, dt: number, canvas: { w: number; h: number }): GameState {
+  if (s.launchPhase === 'countdown') {
+    s.launchCountdown -= dt;
+    if (s.launchCountdown <= 0) {
+      s.launchPhase = 'ignition';
+      s.modeTimer = 0;
+    }
+  } else if (s.launchPhase === 'ignition') {
+    // Engine buildup for 1.5s
+    if (s.modeTimer > 1.5) {
+      s.launchPhase = 'liftoff';
+      s.modeTimer = 0;
+    }
+    // Engine particles
+    for (let i = 0; i < 3; i++) {
+      s.particles.push(makeParticle(
+        canvas.w / 2 + (Math.random() - 0.5) * 10,
+        canvas.h * 0.55 + 20,
+        (Math.random() - 0.5) * 40,
+        60 + Math.random() * 80,
+        0.4 + Math.random() * 0.3,
+        2 + Math.random() * 3,
+        `hsl(${20 + Math.random() * 30}, 100%, ${50 + Math.random() * 40}%)`,
+        'exhaust'
+      ));
+    }
+  } else if (s.launchPhase === 'liftoff') {
+    // Ship rises for 2s then transition
+    if (s.modeTimer > 2) {
+      s.mode = 'space-flight';
+      s.modeTimer = 0;
+      s.flightProgress = 0;
+      s.flightShipX = canvas.w / 2;
+      s.flightShipY = canvas.h / 2;
+      s.flightShipVX = 0;
+      s.flightShipVY = 0;
+      // Generate asteroids
+      s.asteroids = Array.from({ length: 8 }, () => ({
+        x: Math.random() * canvas.w * 2 - canvas.w * 0.5,
+        y: Math.random() * canvas.h,
+        size: 4 + Math.random() * 12,
+        vx: -(20 + Math.random() * 40),
+        vy: (Math.random() - 0.5) * 20,
+      }));
+    }
+    // Lots of exhaust
+    for (let i = 0; i < 4; i++) {
+      s.particles.push(makeParticle(
+        canvas.w / 2 + (Math.random() - 0.5) * 14,
+        canvas.h * 0.55 + 20 + s.modeTimer * 50,
+        (Math.random() - 0.5) * 60,
+        80 + Math.random() * 120,
+        0.3 + Math.random() * 0.4,
+        2 + Math.random() * 4,
+        `hsl(${15 + Math.random() * 35}, 100%, ${50 + Math.random() * 40}%)`,
+        'exhaust'
+      ));
+    }
   }
   return s;
 }
 
-function updateTravel(s: GameState, dt: number): GameState {
-  const travelDuration = 4; // seconds
-  s.travelProgress = Math.min(1, s.modeTimer / travelDuration);
+function tickSpaceFlight(s: GameState, dt: number, keys: Keys, canvas: { w: number; h: number }): GameState {
+  const duration = 6;
+  s.flightProgress = Math.min(1, s.modeTimer / duration);
 
-  // Interpolate ship position
-  const t = easeInOutCubic(s.travelProgress);
-  s.shipX = s.travelStartX + (s.travelEndX - s.travelStartX) * t;
-  s.shipY = s.travelStartY + (s.travelEndY - s.travelStartY) * t;
+  // Player control
+  const accel = 200;
+  if (keys.left) s.flightShipVX -= accel * dt;
+  if (keys.right) s.flightShipVX += accel * dt;
+  if (keys.up) s.flightShipVY -= accel * dt;
+  if (keys.down) s.flightShipVY += accel * dt;
 
-  // Calculate angle toward destination
-  const dx = s.travelEndX - s.shipX;
-  const dy = s.travelEndY - s.shipY;
-  s.shipAngle = Math.atan2(dy, dx) - Math.PI / 2;
+  // Damping
+  s.flightShipVX *= 0.95;
+  s.flightShipVY *= 0.95;
 
-  // Exhaust particles
-  if (Math.random() > 0.2) {
-    s.particles = addExhaustParticle(s.particles, s.shipX, s.shipY, s.shipAngle);
+  // Clamp to center area
+  const maxOffset = 100;
+  s.flightShipX = Math.max(canvas.w / 2 - maxOffset, Math.min(canvas.w / 2 + maxOffset, s.flightShipX + s.flightShipVX * dt));
+  s.flightShipY = Math.max(canvas.h / 2 - maxOffset, Math.min(canvas.h / 2 + maxOffset, s.flightShipY + s.flightShipVY * dt));
+
+  // Move asteroids
+  s.asteroids = s.asteroids.map(a => {
+    let nx = a.x + a.vx * dt * (1 + s.flightProgress * 3);
+    let ny = a.y + a.vy * dt;
+    if (nx < -50) { nx = canvas.w + 50; ny = Math.random() * canvas.h; }
+    return { ...a, x: nx, y: ny };
+  });
+
+  // Check asteroid collision
+  for (const a of s.asteroids) {
+    const dist = Math.hypot(a.x - s.flightShipX, a.y - s.flightShipY);
+    if (dist < a.size + 15) {
+      s.hull = Math.max(0, s.hull - dt * 10);
+      // Spark particles
+      for (let i = 0; i < 2; i++) {
+        s.particles.push(makeParticle(
+          s.flightShipX, s.flightShipY,
+          (Math.random() - 0.5) * 100, (Math.random() - 0.5) * 100,
+          0.3, 2, '#ffaa00', 'spark'
+        ));
+      }
+    }
   }
 
-  // Fuel decreases
-  s.fuel = Math.max(0, s.fuel - dt * 2);
+  // Exhaust
+  if (Math.random() > 0.3) {
+    s.particles.push(makeParticle(
+      s.flightShipX, s.flightShipY + 18,
+      (Math.random() - 0.5) * 20, 40 + Math.random() * 60,
+      0.3 + Math.random() * 0.3, 2 + Math.random() * 2,
+      `hsl(${200 + Math.random() * 40}, 80%, ${60 + Math.random() * 30}%)`,
+      'exhaust'
+    ));
+  }
 
-  if (s.travelProgress >= 1) {
+  if (s.flightProgress >= 1) {
+    s.mode = 'approach';
+    s.modeTimer = 0;
+    s.approachDistance = 500000;
+    s.approachSpeed = 80000;
+  }
+  return s;
+}
+
+function tickApproach(s: GameState, dt: number, canvas: { w: number; h: number }): GameState {
+  const duration = 3;
+  const t = Math.min(1, s.modeTimer / duration);
+  s.approachDistance = 500000 * (1 - easeInOut(t));
+
+  if (t >= 1) {
     s.mode = 'orbit';
     s.modeTimer = 0;
     s.orbitAngle = 0;
-    s.orbitAltitude = 120;
+    s.orbitRadius = Math.min(canvas.w, canvas.h) * 0.32;
   }
   return s;
 }
 
-function updateOrbit(s: GameState, dt: number): GameState {
-  s.orbitAngle += dt * 0.8;
-  s.orbitAltitude = 120 + Math.sin(s.modeTimer * 0.5) * 5;
-
-  // Ship orbits around planet (planet is at center in orbit view)
-  s.shipX = Math.cos(s.orbitAngle) * s.orbitAltitude;
-  s.shipY = Math.sin(s.orbitAngle) * s.orbitAltitude;
-  s.shipAngle = s.orbitAngle + Math.PI / 2;
-
+function tickOrbit(s: GameState, dt: number): GameState {
+  s.orbitAngle += s.orbitSpeed * dt;
   return s;
 }
 
-function updateLanding(s: GameState, dt: number): GameState {
-  const landDuration = 3;
-  s.landingProgress = Math.min(1, s.modeTimer / landDuration);
-  s.landingAltitude = 500 * (1 - easeInOutCubic(s.landingProgress));
+function tickLanding(s: GameState, dt: number, canvas: { w: number; h: number }): GameState {
+  const totalDuration = 5;
+  const t = Math.min(1, s.modeTimer / totalDuration);
+
+  // Phase transitions
+  if (t < 0.15) {
+    s.landingPhase = 'deorbit';
+    s.landingAltitude = lerp(100000, 50000, t / 0.15);
+  } else if (t < 0.4) {
+    s.landingPhase = 'entry';
+    s.landingAltitude = lerp(50000, 10000, (t - 0.15) / 0.25);
+    s.landingShake = 3;
+    // Atmospheric particles
+    if (s.currentPlanet?.hasAtmosphere && Math.random() > 0.5) {
+      s.particles.push(makeParticle(
+        canvas.w / 2 + (Math.random() - 0.5) * canvas.w,
+        -10,
+        (Math.random() - 0.5) * 30,
+        200 + Math.random() * 200,
+        0.5 + Math.random() * 0.5,
+        1 + Math.random() * 2,
+        s.currentPlanet.atmosphereColor.replace(/[\d.]+\)$/, '0.5)'),
+        'atmosphere'
+      ));
+    }
+  } else if (t < 0.75) {
+    s.landingPhase = 'descent';
+    s.landingAltitude = lerp(10000, 500, (t - 0.4) / 0.35);
+    s.landingShake = 2 * (1 - (t - 0.4) / 0.35);
+  } else if (t < 0.95) {
+    s.landingPhase = 'final';
+    s.landingAltitude = lerp(500, 10, (t - 0.75) / 0.2);
+    s.landingShake = 1 * (1 - (t - 0.75) / 0.2);
+    // Engine dust
+    for (let i = 0; i < 2; i++) {
+      s.particles.push(makeParticle(
+        canvas.w / 2 + (Math.random() - 0.5) * 30,
+        canvas.h * 0.6 + 15,
+        (Math.random() - 0.5) * 60,
+        20 + Math.random() * 40,
+        0.4 + Math.random() * 0.3,
+        2 + Math.random() * 3,
+        s.currentPlanet?.groundColors[0] || '#888',
+        'dust'
+      ));
+    }
+  } else {
+    s.landingPhase = 'touchdown';
+    s.landingAltitude = 0;
+    s.landingShake = 0;
+  }
 
   // Engine particles during landing
-  if (Math.random() > 0.3) {
-    s.particles = [
-      ...s.particles,
-      {
-        x: (Math.random() - 0.5) * 20,
-        y: 20 + Math.random() * 10,
-        vx: (Math.random() - 0.5) * 30,
-        vy: 20 + Math.random() * 40,
-        life: 0.5 + Math.random() * 0.5,
-        maxLife: 1,
-        size: 2 + Math.random() * 3,
-        color: `hsl(${30 + Math.random() * 20}, 100%, ${50 + Math.random() * 30}%)`,
-      },
-    ];
+  if (t < 0.95 && Math.random() > 0.4) {
+    s.particles.push(makeParticle(
+      canvas.w / 2 + (Math.random() - 0.5) * 12,
+      canvas.h * 0.45 + 20,
+      (Math.random() - 0.5) * 30,
+      40 + Math.random() * 60,
+      0.3 + Math.random() * 0.3,
+      2 + Math.random() * 3,
+      `hsl(${20 + Math.random() * 20}, 100%, ${50 + Math.random() * 30}%)`,
+      'exhaust'
+    ));
   }
 
-  if (s.landingProgress >= 1) {
-    // Landed!
-    if (!s.visitedPlanets.includes(s.currentPlanet?.name || '')) {
-      // Will be added on return
-    }
+  if (t >= 1 && s.landingPhase === 'touchdown' && s.modeTimer > totalDuration + 0.5) {
+    // Auto transition to surface
+    s.mode = 'surface';
+    s.modeTimer = 0;
+    s.playerX = s.landerX;
+    s.playerY = s.landerY + 80;
+    s.playerVX = 0;
+    s.playerVY = 0;
+    s.playerAngle = -Math.PI / 2;
+    s.message = `LANDED ON ${s.currentPlanet?.name.toUpperCase()}`;
+    s.messageTimer = 2.5;
+    s.messageType = 'success';
   }
+
   return s;
 }
 
-function updateSurface(s: GameState, dt: number, keys: KeyState, canvasSize: { w: number; h: number }): GameState {
-  const speed = 150;
-  let dx = 0, dy = 0;
+function tickSurface(s: GameState, dt: number, keys: Keys, _canvas: { w: number; h: number }): GameState {
+  const speed = 180;
+  const friction = 0.88;
+  let ax = 0, ay = 0;
 
-  if (keys.up) dy -= 1;
-  if (keys.down) dy += 1;
-  if (keys.left) dx -= 1;
-  if (keys.right) dx += 1;
+  if (keys.left) ax -= 1;
+  if (keys.right) ax += 1;
+  if (keys.up) ay -= 1;
+  if (keys.down) ay += 1;
 
-  if (dx !== 0 || dy !== 0) {
-    const len = Math.hypot(dx, dy);
-    dx /= len;
-    dy /= len;
-    s.playerX += dx * speed * dt;
-    s.playerY += dy * speed * dt;
-    s.playerAngle = Math.atan2(dy, dx);
-
-    // Clamp to world bounds
-    s.playerX = Math.max(20, Math.min(s.surfaceWorldWidth - 20, s.playerX));
-    s.playerY = Math.max(20, Math.min(s.surfaceWorldHeight - 20, s.playerY));
+  if (ax !== 0 || ay !== 0) {
+    const len = Math.hypot(ax, ay);
+    ax /= len;
+    ay /= len;
+    s.playerVX += ax * speed * dt * 5;
+    s.playerVY += ay * speed * dt * 5;
+    s.playerAngle = Math.atan2(ay, ax);
+    s.playerMoving = true;
+  } else {
+    s.playerMoving = false;
   }
 
-  // Check proximity to ship
-  const distToShip = Math.hypot(s.playerX - s.shipSurfaceX, s.playerY - s.shipSurfaceY);
-  s.nearShip = distToShip < 60;
+  s.playerVX *= friction;
+  s.playerVY *= friction;
 
-  // Check proximity to scan locations
+  const maxSpeed = speed;
+  const spd = Math.hypot(s.playerVX, s.playerVY);
+  if (spd > maxSpeed) {
+    s.playerVX = (s.playerVX / spd) * maxSpeed;
+    s.playerVY = (s.playerVY / spd) * maxSpeed;
+  }
+
+  s.playerX += s.playerVX * dt;
+  s.playerY += s.playerVY * dt;
+
+  // Clamp
+  s.playerX = Math.max(50, Math.min(s.worldWidth - 50, s.playerX));
+  s.playerY = Math.max(50, Math.min(s.worldHeight - 50, s.playerY));
+
+  // Camera follows player with smoothing
+  const targetCamX = s.playerX - _canvas.w / 2;
+  const targetCamY = s.playerY - _canvas.h / 2;
+  s.surfaceCameraX = lerp(s.surfaceCameraX, targetCamX, dt * 4);
+  s.surfaceCameraY = lerp(s.surfaceCameraY, targetCamY, dt * 4);
+
+  // Check proximity to scan targets
+  s.nearTarget = null;
+  for (const t of s.scanTargets) {
+    if (!t.scanned && Math.hypot(s.playerX - t.x, s.playerY - t.y) < 60) {
+      s.nearTarget = t;
+      break;
+    }
+  }
+
+  // Check proximity to lander
+  s.nearLander = Math.hypot(s.playerX - s.landerX, s.playerY - s.landerY) < 70;
+
+  // Space key for scanning or boarding
   if (keys.space) {
-    keys.space = false; // consume
-    for (let i = 0; i < s.scanLocations.length; i++) {
-      const loc = s.scanLocations[i];
-      if (!loc.scanned) {
-        const dist = Math.hypot(s.playerX - loc.x, s.playerY - loc.y);
-        if (dist < 50) {
-          s.scanLocations = s.scanLocations.map((l, idx) =>
-            idx === i ? { ...l, scanned: true } : l
-          );
-          s.missionProgress += 1;
-          s.message = `+1 SAMPLE — ${loc.label} scanned!`;
-          s.messageTimer = 2.5;
-
-          // Check mission complete
-          if (s.missionProgress >= s.missionTarget) {
-            s.message = 'MISSION COMPLETE! +250 Research Points — Return to ship!';
-            s.messageTimer = 4;
-          }
-          break;
-        }
-      }
+    keys.space = false;
+    if (s.nearTarget && !s.nearTarget.scanned) {
+      // Will be handled by scanTarget action
+    } else if (s.nearLander && s.mode === 'mission-complete') {
+      // Board ship handled by boardShip action
     }
   }
 
-  // Dust particles when moving
-  if ((dx !== 0 || dy !== 0) && s.currentPlanet?.hasSolidSurface && Math.random() > 0.6) {
-    s.particles = [
-      ...s.particles,
-      {
-        x: s.playerX + (Math.random() - 0.5) * 10,
-        y: s.playerY + (Math.random() - 0.5) * 10,
-        vx: -dx * 20 + (Math.random() - 0.5) * 20,
-        vy: -dy * 20 + (Math.random() - 0.5) * 20,
-        life: 0.3 + Math.random() * 0.3,
-        maxLife: 0.6,
-        size: 1 + Math.random() * 2,
-        color: s.currentPlanet.surfaceColors[0] + '80',
-      },
-    ];
+  // Dust particles when moving on solid surface
+  if (s.playerMoving && s.currentPlanet?.hasSolidSurface && Math.random() > 0.5) {
+    s.particles.push(makeParticle(
+      s.playerX + (Math.random() - 0.5) * 15,
+      s.playerY + 10,
+      -s.playerVX * 0.2 + (Math.random() - 0.5) * 20,
+      -s.playerVY * 0.2 + (Math.random() - 0.5) * 10,
+      0.3 + Math.random() * 0.3,
+      1.5 + Math.random() * 2,
+      s.currentPlanet.groundColors[0] + '80',
+      'dust'
+    ));
   }
 
   return s;
 }
 
-function updateReturnTravel(s: GameState, dt: number): GameState {
-  const travelDuration = 3;
-  s.travelProgress = Math.min(1, s.modeTimer / travelDuration);
+function tickTakeoff(s: GameState, dt: number, canvas: { w: number; h: number }): GameState {
+  // 3 second takeoff animation
+  if (s.modeTimer > 3) {
+    s.mode = 'returning';
+    s.modeTimer = 0;
+    s.flightProgress = 0;
+  }
 
-  if (s.travelProgress >= 1) {
-    // Add visited and points before clearing
+  // Engine particles
+  for (let i = 0; i < 3; i++) {
+    s.particles.push(makeParticle(
+      canvas.w / 2 + (Math.random() - 0.5) * 14,
+      canvas.h * 0.5 + s.modeTimer * 30,
+      (Math.random() - 0.5) * 50,
+      60 + Math.random() * 100,
+      0.3 + Math.random() * 0.4,
+      2 + Math.random() * 3,
+      `hsl(${15 + Math.random() * 30}, 100%, ${50 + Math.random() * 40}%)`,
+      'exhaust'
+    ));
+  }
+
+  // Dust cloud at start
+  if (s.modeTimer < 1 && Math.random() > 0.3) {
+    for (let i = 0; i < 2; i++) {
+      s.particles.push(makeParticle(
+        canvas.w / 2 + (Math.random() - 0.5) * 80,
+        canvas.h * 0.7,
+        (Math.random() - 0.5) * 80,
+        -(10 + Math.random() * 30),
+        0.5 + Math.random() * 0.5,
+        3 + Math.random() * 4,
+        s.currentPlanet?.groundColors[0] + '60',
+        'dust'
+      ));
+    }
+  }
+
+  return s;
+}
+
+function tickReturning(s: GameState, dt: number): GameState {
+  const duration = 4;
+  s.flightProgress = Math.min(1, s.modeTimer / duration);
+
+  if (s.flightProgress >= 1) {
+    // Complete the mission
     const cp = s.currentPlanet;
+    let newVisited = s.visitedPlanets;
+    let newCompleted = s.completedMissions;
+    let rp = s.researchPoints;
+
     if (cp) {
-      if (!s.visitedPlanets.includes(cp.name)) {
-        s.visitedPlanets = [...s.visitedPlanets, cp.name];
-      }
-      if (s.missionProgress >= s.missionTarget && !s.completedMissions.includes(cp.name)) {
-        s.completedMissions = [...s.completedMissions, cp.name];
-        s.researchPoints += 250;
-      } else {
-        s.researchPoints += 50;
+      if (!newVisited.includes(cp.name)) newVisited = [...newVisited, cp.name];
+      if (s.missionProgress >= s.missionTarget && !newCompleted.includes(cp.name)) {
+        newCompleted = [...newCompleted, cp.name];
+        rp += 300; // Mission completion bonus
       }
     }
+
     s.mode = 'solar-system';
+    s.modeTimer = 0;
     s.currentPlanet = null;
     s.selectedPlanetIndex = null;
-    s.modeTimer = 0;
+    s.visitedPlanets = newVisited;
+    s.completedMissions = newCompleted;
+    s.researchPoints = rp;
+    s.shipSolarX = 0;
+    s.shipSolarY = 145;
+    s.message = `Expedition complete! +${cp && s.missionProgress >= s.missionTarget ? 300 : 0} bonus RP`;
+    s.messageTimer = 3;
+    s.messageType = 'success';
   }
 
-  // Travel back to destination (Earth)
-  const t = easeInOutCubic(s.travelProgress);
-  const endX = s.travelEndX || 0;
-  const endY = s.travelEndY || 145;
-  s.shipX = s.travelStartX + (endX - s.travelStartX) * t;
-  s.shipY = s.travelStartY + (endY - s.travelStartY) * t;
-  const ddx = endX - s.shipX;
-  const ddy = endY - s.shipY;
-  if (Math.abs(ddx) > 0.1 || Math.abs(ddy) > 0.1) {
-    s.shipAngle = Math.atan2(ddy, ddx) - Math.PI / 2;
+  // Exhaust
+  if (Math.random() > 0.4) {
+    s.particles.push(makeParticle(
+      400 + (Math.random() - 0.5) * 10,
+      300 + 18,
+      (Math.random() - 0.5) * 20,
+      40 + Math.random() * 50,
+      0.3, 2,
+      `hsl(${200 + Math.random() * 40}, 80%, ${60 + Math.random() * 30}%)`,
+      'exhaust'
+    ));
   }
 
-  if (Math.random() > 0.3) {
-    s.particles = addExhaustParticle(s.particles, s.shipX, s.shipY, s.shipAngle);
-  }
-
-  return s;
-}
-
-function updateReturnOrbit(s: GameState, dt: number): GameState {
-  s.orbitAngle += dt * 1.2;
-  s.orbitAltitude += dt * 30;
-
-  s.shipX = Math.cos(s.orbitAngle) * s.orbitAltitude;
-  s.shipY = Math.sin(s.orbitAngle) * s.orbitAltitude;
-  s.shipAngle = s.orbitAngle + Math.PI / 2;
-
-  if (s.modeTimer > 3) {
-    // Transition to return travel - set start to planet position, end to Earth
-    s.mode = 'return-travel';
-    s.modeTimer = 0;
-    s.travelProgress = 0;
-    // Planet position in solar system coords
-    if (s.currentPlanet) {
-      const planetIdx = planets.indexOf(s.currentPlanet);
-      if (planetIdx >= 0) {
-        const angle = s.planetAngles[planetIdx];
-        s.travelStartX = Math.cos(angle) * s.currentPlanet.orbitRadius;
-        s.travelStartY = Math.sin(angle) * s.currentPlanet.orbitRadius;
-      } else {
-        s.travelStartX = s.shipX;
-        s.travelStartY = s.shipY;
-      }
-    } else {
-      s.travelStartX = 0;
-      s.travelStartY = 0;
-    }
-    s.travelEndX = 0;
-    s.travelEndY = 145; // Earth's orbit radius
-    s.shipX = s.travelStartX;
-    s.shipY = s.travelStartY;
-  }
   return s;
 }
 
@@ -590,33 +733,6 @@ function updateReturnOrbit(s: GameState, dt: number): GameState {
 // HELPERS
 // ============================================================
 
-function easeInOutCubic(t: number): number {
-  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-}
-
-function addExhaustParticle(particles: Particle[], x: number, y: number, angle: number): Particle[] {
-  const spread = 0.5;
-  const backAngle = angle + Math.PI;
-  const newP: Particle = {
-    x: x + Math.cos(backAngle) * 12,
-    y: y + Math.sin(backAngle) * 12,
-    vx: Math.cos(backAngle + (Math.random() - 0.5) * spread) * (40 + Math.random() * 30),
-    vy: Math.sin(backAngle + (Math.random() - 0.5) * spread) * (40 + Math.random() * 30),
-    life: 0.3 + Math.random() * 0.4,
-    maxLife: 0.7,
-    size: 1.5 + Math.random() * 2.5,
-    color: `hsl(${20 + Math.random() * 30}, 100%, ${50 + Math.random() * 40}%)`,
-  };
-  return [...particles.slice(-80), newP]; // limit particles
-}
-
-function updateParticles(particles: Particle[], dt: number): Particle[] {
-  return particles
-    .map(p => ({
-      ...p,
-      x: p.x + p.vx * dt,
-      y: p.y + p.vy * dt,
-      life: p.life - dt,
-    }))
-    .filter(p => p.life > 0);
+function makeParticle(x: number, y: number, vx: number, vy: number, life: number, size: number, color: string, type: Particle['type'] = 'exhaust'): Particle {
+  return { x, y, vx, vy, life, maxLife: life, size, color, type };
 }
