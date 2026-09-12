@@ -17,6 +17,7 @@ export function render(ctx: CanvasRenderingContext2D, s: GameState, w: number, h
     case 'orbit': renderOrbit(ctx, s, w, h, time); break;
     case 'landing': renderLanding(ctx, s, w, h, time); break;
     case 'surface': renderSurface(ctx, s, w, h, time); break;
+    case 'atmospheric-probe': renderAtmosphericProbe(ctx, s, w, h, time); break;
     case 'mission-complete': renderSurface(ctx, s, w, h, time); break;
     case 'takeoff': renderTakeoff(ctx, s, w, h, time); break;
     case 'returning': renderReturning(ctx, s, w, h, time); break;
@@ -936,6 +937,116 @@ function drawRover(
   }
 
   ctx.restore();
+}
+
+// ============================================================
+// ATMOSPHERIC PROBE
+// ============================================================
+
+function renderAtmosphericProbe(ctx: CanvasRenderingContext2D, s: GameState, w: number, h: number, time: number) {
+  if (!s.currentPlanet) return;
+  const planet = s.currentPlanet;
+
+  // Atmospheric background - gradient based on altitude
+  const altFactor = s.landingAltitude / 100000;
+  const bg = ctx.createLinearGradient(0, 0, 0, h);
+  bg.addColorStop(0, planet.skyGradient[0]);
+  bg.addColorStop(0.5, planet.skyGradient[1]);
+  bg.addColorStop(1, planet.skyGradient[2]);
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, w, h);
+
+  // Atmospheric layers - multiple cloud bands
+  for (let i = 0; i < 8; i++) {
+    const layerY = (h * 0.1) + (i * h * 0.12);
+    const layerAlpha = 0.15 + Math.sin(time * 0.5 + i) * 0.05;
+    ctx.fillStyle = planet.featureColors[i % planet.featureColors.length] + Math.floor(layerAlpha * 255).toString(16).padStart(2, '0');
+    ctx.beginPath();
+    ctx.ellipse(w / 2 + Math.sin(time * 0.3 + i) * 50, layerY, w * 0.8, 40 + i * 10, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Atmospheric haze overlay
+  ctx.fillStyle = planet.atmosphereColor;
+  ctx.fillRect(0, 0, w, h);
+
+  // Scan targets (atmospheric data points at different altitudes)
+  s.scanTargets.forEach((target) => {
+    const targetAltitude = 80000 - target.id * 25000;
+    const altitudeDiff = Math.abs(s.landingAltitude - targetAltitude);
+
+    if (altitudeDiff < 15000) {
+      // Show target when close in altitude
+      const proximity = 1 - altitudeDiff / 15000;
+      const targetY = h / 2 + (s.landingAltitude - targetAltitude) * 0.01;
+      const targetX = w / 2 + s.landingHorizontalSpeed * 2;
+
+      if (!target.scanned) {
+        // Pulsing beacon
+        const pulse = Math.sin(time * 3 + target.id * 2) * 0.3 + 0.7;
+        const beaconSize = 15 + pulse * 5;
+
+        // Outer ring
+        ctx.beginPath();
+        ctx.arc(targetX, targetY, beaconSize + 8, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(100, 200, 255, ${pulse * proximity * 0.5})`;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Inner diamond
+        ctx.save();
+        ctx.translate(targetX, targetY);
+        ctx.rotate(time * 0.8);
+        ctx.beginPath();
+        ctx.moveTo(0, -8);
+        ctx.lineTo(8, 0);
+        ctx.lineTo(0, 8);
+        ctx.lineTo(-8, 0);
+        ctx.closePath();
+        ctx.fillStyle = `rgba(100, 200, 255, ${pulse * proximity * 0.8})`;
+        ctx.fill();
+        ctx.strokeStyle = `rgba(100, 200, 255, ${pulse * proximity})`;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.restore();
+
+        // Label
+        ctx.fillStyle = `rgba(100, 200, 255, ${proximity * 0.9})`;
+        ctx.font = '11px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(target.label, targetX, targetY + 25);
+
+        // Altitude indicator
+        ctx.fillText(`${Math.round(targetAltitude / 1000)}km`, targetX, targetY + 38);
+      } else {
+        // Scanned marker
+        ctx.fillStyle = `rgba(100, 200, 255, ${proximity * 0.4})`;
+        ctx.beginPath();
+        ctx.arc(targetX, targetY, 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = `rgba(100, 255, 150, ${proximity})`;
+        ctx.font = 'bold 14px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('✓', targetX, targetY + 5);
+      }
+    }
+  });
+
+  // Probe/ship
+  const probeX = w / 2 + s.landingHorizontalSpeed * 2;
+  const probeY = h * 0.45;
+  drawSpaceship(ctx, probeX, probeY, 0, 1.5, time, true);
+
+  // Particles
+  drawParticles(ctx, s.particles);
+
+  // Scan prompt
+  if (s.nearTarget && !s.nearTarget.scanned) {
+    ctx.fillStyle = '#60c0ff';
+    ctx.font = 'bold 14px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`[SPACE] COLLECT ${s.nearTarget.label.toUpperCase()}`, w / 2, h - 80);
+  }
 }
 
 // ============================================================

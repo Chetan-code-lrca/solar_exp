@@ -74,9 +74,9 @@ export default function App() {
     return () => cancelAnimationFrame(raf);
   }, [state]);
 
-  // Surface keyboard handler for scan/board
+  // Surface/atmospheric keyboard handler for scan/board
   useEffect(() => {
-    if (state.mode !== 'surface' && state.mode !== 'mission-complete') return;
+    if (state.mode !== 'surface' && state.mode !== 'mission-complete' && state.mode !== 'atmospheric-probe') return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === ' ') {
         e.preventDefault();
@@ -323,8 +323,8 @@ export default function App() {
                 <div className="text-blue-400 text-[10px] uppercase tracking-wider mb-2">Navigation</div>
                 <div className="space-y-1.5 text-xs">
                   <HudRow label="Destination" value={state.currentPlanet?.name || ''} color="text-white" />
-                  <HudRow label="Distance" value={formatDistance(500000 * (1 - state.flightProgress))} color="text-blue-300" />
-                  <HudRow label="Speed" value={`${Math.round(50 + state.flightProgress * 200)} km/s`} color="text-cyan-300" />
+                  <HudRow label="Distance" value={formatDistance(state.flightTargetDistance * (1 - state.flightProgress))} color="text-blue-300" />
+                  <HudRow label="Thrust" value={state.flightThrust > 0 ? 'ACTIVE' : 'OFF'} color={state.flightThrust > 0 ? 'text-orange-400' : 'text-gray-500'} />
                 </div>
                 <div className="mt-2">
                   <div className="text-gray-500 text-[10px] mb-1">PROGRESS</div>
@@ -348,7 +348,7 @@ export default function App() {
             {/* Controls hint */}
             {!isMobile && (
               <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20">
-                <div className="text-gray-600 text-[10px]">WASD to adjust position</div>
+                <div className="text-gray-600 text-[10px]">WASD: Thrust • Avoid asteroids!</div>
               </div>
             )}
           </>
@@ -372,8 +372,9 @@ export default function App() {
                 <div className="text-blue-400 text-[10px] uppercase tracking-wider mb-2">{state.currentPlanet.name} Orbit</div>
                 <div className="space-y-1.5 text-xs">
                   <HudRow label="Altitude" value={`${Math.round(state.orbitRadius)} km`} color="text-white" />
-                  <HudRow label="Velocity" value="3.4 km/s" color="text-cyan-300" />
-                  <HudRow label="Fuel" value={`${Math.round(state.fuel)}%`} color="text-green-400" />
+                  <HudRow label="Velocity" value={`${(state.orbitSpeed * 5.7).toFixed(1)} km/s`} color="text-cyan-300" />
+                  <HudRow label="Stability" value={`${Math.round(state.orbitStability)}%`} color={state.orbitStability < 50 ? 'text-red-400' : 'text-green-400'} />
+                  <HudRow label="Fuel" value={`${Math.round(state.fuel)}%`} color={state.fuel < 20 ? 'text-red-400' : 'text-green-400'} />
                 </div>
                 <div className="mt-2 pt-2 border-t border-gray-700/50">
                   <div className="text-green-400 text-[10px]">● LANDING WINDOW AVAILABLE</div>
@@ -386,7 +387,7 @@ export default function App() {
                 onClick={beginLanding}
                 className="px-6 py-2.5 bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-500 hover:to-red-500 text-white font-bold rounded-lg transition-all hover:scale-105 active:scale-95 shadow-lg shadow-orange-600/20 text-sm"
               >
-                ↓ BEGIN LANDING
+                {state.currentPlanet.hasSolidSurface ? '↓ BEGIN LANDING' : '↓ DEPLOY PROBE'}
               </button>
               <button
                 onClick={continueOrbit}
@@ -395,29 +396,79 @@ export default function App() {
                 CONTINUE ORBIT
               </button>
             </div>
+
+            {/* Controls hint */}
+            {!isMobile && (
+              <div className="absolute bottom-4 left-4 z-20">
+                <div className="text-gray-600 text-[10px]">W/S: Adjust altitude • A/D: Adjust speed</div>
+              </div>
+            )}
           </>
         )}
 
         {/* ============ LANDING HUD ============ */}
         {state.mode === 'landing' && state.currentPlanet && (
-          <div className="absolute top-4 left-4 z-30">
-            <div className="bg-gray-900/80 backdrop-blur-sm border border-orange-700/40 rounded-xl p-3">
-              <div className="text-orange-400 text-[10px] uppercase tracking-wider mb-2">Landing — {state.currentPlanet.name}</div>
-              <div className="space-y-1.5">
-                <div>
-                  <div className="text-gray-500 text-[10px]">PHASE</div>
-                  <div className="text-white text-xs font-bold uppercase">{state.landingPhase}</div>
-                </div>
-                <div>
-                  <div className="text-gray-500 text-[10px]">ALTITUDE</div>
-                  <div className="w-32 h-1.5 bg-gray-800 rounded-full overflow-hidden">
-                    <div className="h-full bg-gradient-to-r from-green-500 to-yellow-500 transition-all" style={{ width: `${Math.min(100, state.landingAltitude / 1000)}%` }} />
+          <>
+            <div className="absolute top-4 left-4 z-30">
+              <div className="bg-gray-900/80 backdrop-blur-sm border border-orange-700/40 rounded-xl p-3">
+                <div className="text-orange-400 text-[10px] uppercase tracking-wider mb-2">Landing — {state.currentPlanet.name}</div>
+                <div className="space-y-1.5">
+                  <div>
+                    <div className="text-gray-500 text-[10px]">PHASE</div>
+                    <div className="text-white text-xs font-bold uppercase">{state.landingPhase}</div>
                   </div>
-                  <div className="text-white text-[10px] mt-0.5">{formatAltitude(state.landingAltitude)}</div>
+                  <div>
+                    <div className="text-gray-500 text-[10px]">ALTITUDE</div>
+                    <div className="w-32 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                      <div className="h-full bg-gradient-to-r from-green-500 to-yellow-500 transition-all" style={{ width: `${Math.min(100, state.landingAltitude / 1000)}%` }} />
+                    </div>
+                    <div className="text-white text-[10px] mt-0.5">{formatAltitude(state.landingAltitude)}</div>
+                  </div>
+                  <div>
+                    <div className="text-gray-500 text-[10px]">VERTICAL SPEED</div>
+                    <div className={`text-xs font-bold ${Math.abs(state.landingVerticalSpeed) > 30 ? 'text-red-400' : 'text-green-400'}`}>
+                      {Math.round(state.landingVerticalSpeed)} m/s
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-gray-500 text-[10px]">HORIZONTAL SPEED</div>
+                    <div className={`text-xs font-bold ${Math.abs(state.landingHorizontalSpeed) > 20 ? 'text-red-400' : 'text-green-400'}`}>
+                      {Math.round(state.landingHorizontalSpeed)} m/s
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-gray-500 text-[10px]">THRUST</div>
+                    <div className="w-32 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                      <div className="h-full bg-orange-500 transition-all" style={{ width: `${state.landingThrust * 100}%` }} />
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-gray-500 text-[10px]">FUEL</div>
+                    <div className={`text-xs font-bold ${state.fuel < 20 ? 'text-red-400' : 'text-green-400'}`}>
+                      {Math.round(state.fuel)}%
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
+
+            {/* Landing warnings */}
+            {(Math.abs(state.landingVerticalSpeed) > 30 || Math.abs(state.landingHorizontalSpeed) > 20) && state.landingAltitude < 1000 && (
+              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-40">
+                <div className="bg-red-900/80 border border-red-500 rounded-lg px-4 py-2 animate-pulse">
+                  <div className="text-red-200 text-sm font-bold">⚠ TOO FAST</div>
+                  <div className="text-red-300 text-xs">Slow descent before landing!</div>
+                </div>
+              </div>
+            )}
+
+            {/* Controls hint */}
+            {!isMobile && (
+              <div className="absolute bottom-4 left-4 z-20">
+                <div className="text-gray-600 text-[10px]">W: Thrust up • A/D: Horizontal correction</div>
+              </div>
+            )}
+          </>
         )}
 
         {/* ============ SURFACE HUD ============ */}
@@ -469,6 +520,51 @@ export default function App() {
           </>
         )}
 
+        {/* ============ ATMOSPHERIC PROBE HUD ============ */}
+        {state.mode === 'atmospheric-probe' && state.currentPlanet && (
+          <>
+            {/* Mission panel */}
+            <div className="absolute top-4 left-4 z-30">
+              <div className="bg-gray-900/80 backdrop-blur-sm border border-blue-700/40 rounded-xl p-3 max-w-[220px]">
+                <div className="text-blue-400 text-[10px] uppercase tracking-wider mb-1">Atmospheric Probe</div>
+                <div className="text-gray-300 text-xs mb-2">{state.currentPlanet.mission}</div>
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-500 text-[10px]">Progress</span>
+                  <div className="flex gap-1">
+                    {Array.from({ length: state.missionTarget }).map((_, i) => (
+                      <span
+                        key={i}
+                        className={`w-2.5 h-2.5 rounded-full border ${
+                          i < state.missionProgress ? 'bg-blue-500 border-blue-400' : 'bg-gray-800 border-gray-600'
+                        }`}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Probe stats */}
+            <div className="absolute top-4 right-4 z-30">
+              <div className="bg-gray-900/80 backdrop-blur-sm border border-gray-700/40 rounded-xl p-3">
+                <div className="space-y-1.5 text-xs">
+                  <HudRow label="Altitude" value={`${Math.round(state.landingAltitude / 1000)}km`} color="text-blue-300" />
+                  <HudRow label="V-Speed" value={`${Math.round(state.landingVerticalSpeed)}m/s`} color={Math.abs(state.landingVerticalSpeed) > 50 ? 'text-red-400' : 'text-green-400'} />
+                  <HudRow label="H-Speed" value={`${Math.round(state.landingHorizontalSpeed)}m/s`} color="text-cyan-300" />
+                  <HudRow label="Fuel" value={`${Math.round(state.fuel)}%`} color={state.fuel < 20 ? 'text-red-400' : 'text-green-400'} />
+                </div>
+              </div>
+            </div>
+
+            {/* Controls hint */}
+            {!isMobile && (
+              <div className="absolute bottom-4 left-4 z-20">
+                <div className="text-gray-600 text-[10px]">W/S: Thrust • A/D: Horizontal • SPACE: Collect</div>
+              </div>
+            )}
+          </>
+        )}
+
         {/* ============ MISSION COMPLETE OVERLAY ============ */}
         {state.mode === 'mission-complete' && (
           <div className="absolute top-1/3 left-1/2 -translate-x-1/2 z-40 animate-fade-in">
@@ -478,10 +574,17 @@ export default function App() {
               <p className="text-gray-400 text-xs mt-1">{state.currentPlanet?.name} survey complete.</p>
               <p className="text-green-400 text-xs mt-1">+300 bonus RP on return</p>
               <button
-                onClick={returnFromComplete}
+                onClick={() => {
+                  // For atmospheric probes, go directly to returning
+                  if (!state.currentPlanet?.hasSolidSurface) {
+                    boardShip();
+                  } else {
+                    returnFromComplete();
+                  }
+                }}
                 className="mt-3 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white text-xs rounded-lg transition-all"
               >
-                RETURN TO LANDER →
+                {state.currentPlanet?.hasSolidSurface ? 'RETURN TO LANDER →' : 'RETURN TO ORBIT →'}
               </button>
             </div>
           </div>
@@ -538,7 +641,7 @@ export default function App() {
         )}
 
         {/* ============ MOBILE CONTROLS ============ */}
-        {isMobile && (state.mode === 'surface' || state.mode === 'mission-complete') && (
+        {isMobile && (state.mode === 'surface' || state.mode === 'mission-complete' || state.mode === 'space-flight' || state.mode === 'orbit' || state.mode === 'landing' || state.mode === 'atmospheric-probe') && (
           <div className="absolute bottom-6 right-4 z-40">
             <div className="grid grid-cols-3 gap-1 w-32">
               <div />

@@ -12,6 +12,7 @@ export type GameMode =
   | 'orbit'
   | 'landing'
   | 'surface'
+  | 'atmospheric-probe'
   | 'mission-complete'
   | 'takeoff'
   | 'returning';
@@ -116,10 +117,14 @@ export interface GameState {
 
   // Space flight
   flightProgress: number;
+  flightDistance: number;
+  flightTargetDistance: number;
   flightShipX: number;
   flightShipY: number;
   flightShipVX: number;
   flightShipVY: number;
+  flightShipAngle: number;
+  flightThrust: number;
   asteroids: { x: number; y: number; size: number; vx: number; vy: number }[];
 
   // Approach
@@ -130,11 +135,17 @@ export interface GameState {
   orbitAngle: number;
   orbitRadius: number;
   orbitSpeed: number;
+  orbitTargetRadius: number;
+  orbitStability: number;
 
   // Landing
   landingAltitude: number;
-  landingPhase: 'deorbit' | 'entry' | 'descent' | 'final' | 'touchdown';
+  landingVerticalSpeed: number;
+  landingHorizontalSpeed: number;
+  landingThrust: number;
+  landingPhase: 'deorbit' | 'entry' | 'descent' | 'final' | 'touchdown' | 'crashed';
   landingShake: number;
+  landingSuccess: boolean;
 
   // Surface
   playerX: number;
@@ -423,19 +434,29 @@ export function createInitialState(): GameState {
     targetCameraY: 0,
     targetCameraZoom: 1,
     flightProgress: 0,
+    flightDistance: 0,
+    flightTargetDistance: 1000,
     flightShipX: 0,
     flightShipY: 0,
     flightShipVX: 0,
     flightShipVY: 0,
+    flightShipAngle: 0,
+    flightThrust: 0,
     asteroids: [],
     approachDistance: 500000,
     approachSpeed: 0,
     orbitAngle: 0,
     orbitRadius: 180,
     orbitSpeed: 0.6,
+    orbitTargetRadius: 180,
+    orbitStability: 100,
     landingAltitude: 100000,
+    landingVerticalSpeed: 0,
+    landingHorizontalSpeed: 0,
+    landingThrust: 0,
     landingPhase: 'deorbit',
     landingShake: 0,
+    landingSuccess: false,
     playerX: 0,
     playerY: 0,
     playerVX: 0,

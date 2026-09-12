@@ -169,7 +169,36 @@ export function useGame() {
   }, []);
 
   const beginLanding = useCallback(() => {
-    setState(p => ({ ...p, mode: 'landing', modeTimer: 0, landingPhase: 'deorbit', landingAltitude: 100000 }));
+    setState(p => {
+      if (!p.currentPlanet) return p;
+
+      // Gas giants don't have solid surfaces - use atmospheric probe mode
+      if (!p.currentPlanet.hasSolidSurface) {
+        return {
+          ...p,
+          mode: 'atmospheric-probe',
+          modeTimer: 0,
+          landingAltitude: 100000,
+          landingVerticalSpeed: 0,
+          landingHorizontalSpeed: 0,
+          landingThrust: 0,
+          nearTarget: null,
+        };
+      }
+
+      // Terrestrial planets - normal landing
+      return {
+        ...p,
+        mode: 'landing',
+        modeTimer: 0,
+        landingPhase: 'deorbit',
+        landingAltitude: 100000,
+        landingVerticalSpeed: 0,
+        landingHorizontalSpeed: 0,
+        landingThrust: 0,
+        landingSuccess: false,
+      };
+    });
   }, []);
 
   const continueOrbit = useCallback(() => {
@@ -190,7 +219,19 @@ export function useGame() {
   }, []);
 
   const boardShip = useCallback(() => {
-    setState(p => ({ ...p, mode: 'takeoff', modeTimer: 0 }));
+    setState(p => {
+      // For atmospheric probes, go directly to returning
+      if (p.mode === 'atmospheric-probe' || !p.currentPlanet?.hasSolidSurface) {
+        return {
+          ...p,
+          mode: 'returning',
+          modeTimer: 0,
+          flightProgress: 0,
+        };
+      }
+      // For surface missions, go through takeoff
+      return { ...p, mode: 'takeoff', modeTimer: 0 };
+    });
   }, []);
 
   const scanTarget = useCallback(() => {
@@ -306,9 +347,10 @@ function tick(s: GameState, dt: number, keys: Keys, canvas: { w: number; h: numb
     case 'launch': return tickLaunch(n, dt, canvas);
     case 'space-flight': return tickSpaceFlight(n, dt, keys, canvas);
     case 'approach': return tickApproach(n, dt, canvas);
-    case 'orbit': return tickOrbit(n, dt);
-    case 'landing': return tickLanding(n, dt, canvas);
+    case 'orbit': return tickOrbit(n, dt, keys);
+    case 'landing': return tickLanding(n, dt, keys, canvas);
     case 'surface': return tickSurface(n, dt, keys, canvas);
+    case 'atmospheric-probe': return tickAtmosphericProbe(n, dt, keys, canvas);
     case 'mission-complete': return n;
     case 'takeoff': return tickTakeoff(n, dt, canvas);
     case 'returning': return tickReturning(n, dt);
@@ -353,26 +395,30 @@ function tickLaunch(s: GameState, dt: number, canvas: { w: number; h: number }):
         'exhaust'
       ));
     }
-  } else if (s.launchPhase === 'liftoff') {
+    } else if (s.launchPhase === 'liftoff') {
     // Ship rises for 2s then transition
     if (s.modeTimer > 2) {
       s.mode = 'space-flight';
       s.modeTimer = 0;
       s.flightProgress = 0;
+      s.flightDistance = 0;
+      // Set target distance based on planet
+      s.flightTargetDistance = s.currentPlanet ? s.currentPlanet.fuelCost * 50 : 1000;
       s.flightShipX = canvas.w / 2;
       s.flightShipY = canvas.h / 2;
       s.flightShipVX = 0;
       s.flightShipVY = 0;
-      // Generate asteroids
-      s.asteroids = Array.from({ length: 8 }, () => ({
-        x: Math.random() * canvas.w * 2 - canvas.w * 0.5,
+      s.flightShipAngle = 0;
+      s.flightThrust = 0;
+      // Generate initial asteroids
+      s.asteroids = Array.from({ length: 6 }, () => ({
+        x: canvas.w + Math.random() * 400,
         y: Math.random() * canvas.h,
         size: 4 + Math.random() * 12,
-        vx: -(20 + Math.random() * 40),
-        vy: (Math.random() - 0.5) * 20,
+        vx: -(40 + Math.random() * 60),
+        vy: (Math.random() - 0.5) * 30,
       }));
-    }
-    // Lots of exhaust
+    }    // Lots of exhaust
     for (let i = 0; i < 4; i++) {
       s.particles.push(makeParticle(
         canvas.w / 2 + (Math.random() - 0.5) * 14,
@@ -390,66 +436,130 @@ function tickLaunch(s: GameState, dt: number, canvas: { w: number; h: number }):
 }
 
 function tickSpaceFlight(s: GameState, dt: number, keys: Keys, canvas: { w: number; h: number }): GameState {
-  const duration = 6;
-  s.flightProgress = Math.min(1, s.modeTimer / duration);
+  // Player thrust control
+  const thrustPower = 300;
+  s.flightThrust = 0;
 
-  // Player control
-  const accel = 200;
-  if (keys.left) s.flightShipVX -= accel * dt;
-  if (keys.right) s.flightShipVX += accel * dt;
-  if (keys.up) s.flightShipVY -= accel * dt;
-  if (keys.down) s.flightShipVY += accel * dt;
+  if (keys.up) {
+    s.flightShipVY -= thrustPower * dt;
+    s.flightThrust = 1;
+    s.fuel = Math.max(0, s.fuel - dt * 2); // Fuel consumption
+  }
+  if (keys.down) {
+    s.flightShipVY += thrustPower * dt;
+    s.flightThrust = 1;
+    s.fuel = Math.max(0, s.fuel - dt * 2);
+  }
+  if (keys.left) {
+    s.flightShipVX -= thrustPower * dt;
+    s.flightThrust = 1;
+    s.fuel = Math.max(0, s.fuel - dt * 2);
+  }
+  if (keys.right) {
+    s.flightShipVX += thrustPower * dt;
+    s.flightThrust = 1;
+    s.fuel = Math.max(0, s.fuel - dt * 2);
+  }
 
-  // Damping
-  s.flightShipVX *= 0.95;
-  s.flightShipVY *= 0.95;
+  // Calculate ship angle based on velocity
+  if (Math.abs(s.flightShipVX) > 1 || Math.abs(s.flightShipVY) > 1) {
+    s.flightShipAngle = Math.atan2(s.flightShipVY, s.flightShipVX) - Math.PI / 2;
+  }
 
-  // Clamp to center area
-  const maxOffset = 100;
-  s.flightShipX = Math.max(canvas.w / 2 - maxOffset, Math.min(canvas.w / 2 + maxOffset, s.flightShipX + s.flightShipVX * dt));
-  s.flightShipY = Math.max(canvas.h / 2 - maxOffset, Math.min(canvas.h / 2 + maxOffset, s.flightShipY + s.flightShipVY * dt));
+  // Light damping (space has no friction, but we add minimal drag for playability)
+  s.flightShipVX *= 0.98;
+  s.flightShipVY *= 0.98;
 
-  // Move asteroids
+  // Update position
+  s.flightShipX += s.flightShipVX * dt;
+  s.flightShipY += s.flightShipVY * dt;
+
+  // Clamp to screen bounds
+  const margin = 50;
+  s.flightShipX = Math.max(margin, Math.min(canvas.w - margin, s.flightShipX));
+  s.flightShipY = Math.max(margin, Math.min(canvas.h - margin, s.flightShipY));
+
+  // Distance tracking - ship moves forward automatically
+  const forwardSpeed = 150; // Base forward speed
+  s.flightDistance += forwardSpeed * dt;
+  s.flightProgress = Math.min(1, s.flightDistance / s.flightTargetDistance);
+
+  // Move asteroids toward player (simulating forward movement)
   s.asteroids = s.asteroids.map(a => {
-    let nx = a.x + a.vx * dt * (1 + s.flightProgress * 3);
+    let nx = a.x + a.vx * dt - forwardSpeed * dt * 0.5;
     let ny = a.y + a.vy * dt;
-    if (nx < -50) { nx = canvas.w + 50; ny = Math.random() * canvas.h; }
+    // Respawn asteroids that go off-screen
+    if (nx < -100) {
+      nx = canvas.w + 50 + Math.random() * 200;
+      ny = Math.random() * canvas.h;
+    }
     return { ...a, x: nx, y: ny };
   });
+
+  // Spawn new asteroids periodically
+  if (Math.random() < dt * 0.5 && s.asteroids.length < 12) {
+    s.asteroids.push({
+      x: canvas.w + 50,
+      y: Math.random() * canvas.h,
+      size: 4 + Math.random() * 12,
+      vx: -(40 + Math.random() * 60),
+      vy: (Math.random() - 0.5) * 30,
+    });
+  }
 
   // Check asteroid collision
   for (const a of s.asteroids) {
     const dist = Math.hypot(a.x - s.flightShipX, a.y - s.flightShipY);
     if (dist < a.size + 15) {
-      s.hull = Math.max(0, s.hull - dt * 10);
+      s.hull = Math.max(0, s.hull - dt * 15);
       // Spark particles
-      for (let i = 0; i < 2; i++) {
+      for (let i = 0; i < 3; i++) {
         s.particles.push(makeParticle(
           s.flightShipX, s.flightShipY,
-          (Math.random() - 0.5) * 100, (Math.random() - 0.5) * 100,
-          0.3, 2, '#ffaa00', 'spark'
+          (Math.random() - 0.5) * 150, (Math.random() - 0.5) * 150,
+          0.4, 2.5, '#ffaa00', 'spark'
         ));
       }
+      // Bounce off asteroid
+      const angle = Math.atan2(s.flightShipY - a.y, s.flightShipX - a.x);
+      s.flightShipVX += Math.cos(angle) * 100;
+      s.flightShipVY += Math.sin(angle) * 100;
     }
   }
 
-  // Exhaust
-  if (Math.random() > 0.3) {
+  // Exhaust particles
+  if (s.flightThrust > 0 && Math.random() > 0.3) {
+    const exhaustAngle = s.flightShipAngle + Math.PI;
     s.particles.push(makeParticle(
-      s.flightShipX, s.flightShipY + 18,
-      (Math.random() - 0.5) * 20, 40 + Math.random() * 60,
+      s.flightShipX + Math.cos(exhaustAngle) * 15,
+      s.flightShipY + Math.sin(exhaustAngle) * 15,
+      Math.cos(exhaustAngle) * 80 + (Math.random() - 0.5) * 30,
+      Math.sin(exhaustAngle) * 80 + (Math.random() - 0.5) * 30,
       0.3 + Math.random() * 0.3, 2 + Math.random() * 2,
       `hsl(${200 + Math.random() * 40}, 80%, ${60 + Math.random() * 30}%)`,
       'exhaust'
     ));
   }
 
+  // Check if flight complete
   if (s.flightProgress >= 1) {
     s.mode = 'approach';
     s.modeTimer = 0;
     s.approachDistance = 500000;
     s.approachSpeed = 80000;
   }
+
+  // Check if out of fuel or hull destroyed
+  if (s.fuel <= 0 || s.hull <= 0) {
+    s.message = s.fuel <= 0 ? 'OUT OF FUEL - Mission failed' : 'HULL BREACHED - Mission failed';
+    s.messageTimer = 3;
+    s.messageType = 'warning';
+    // Return to solar system
+    s.mode = 'returning';
+    s.modeTimer = 0;
+    s.flightProgress = 0;
+  }
+
   return s;
 }
 
@@ -463,29 +573,98 @@ function tickApproach(s: GameState, dt: number, canvas: { w: number; h: number }
     s.modeTimer = 0;
     s.orbitAngle = 0;
     s.orbitRadius = Math.min(canvas.w, canvas.h) * 0.32;
+    s.orbitTargetRadius = s.orbitRadius;
+    s.orbitSpeed = 0.6;
+    s.orbitStability = 100;
   }
   return s;
 }
 
-function tickOrbit(s: GameState, dt: number): GameState {
+function tickOrbit(s: GameState, dt: number, keys: Keys): GameState {
+  // Player controls orbital maneuvers
+  const orbitAdjustSpeed = 50;
+
+  // W/S to adjust orbital radius (altitude)
+  if (keys.up) {
+    s.orbitTargetRadius = Math.min(300, s.orbitTargetRadius + orbitAdjustSpeed * dt);
+    s.fuel = Math.max(0, s.fuel - dt * 1);
+  }
+  if (keys.down) {
+    s.orbitTargetRadius = Math.max(100, s.orbitTargetRadius - orbitAdjustSpeed * dt);
+    s.fuel = Math.max(0, s.fuel - dt * 1);
+  }
+
+  // A/D to adjust orbital speed
+  if (keys.left) {
+    s.orbitSpeed = Math.max(0.2, s.orbitSpeed - 0.5 * dt);
+    s.fuel = Math.max(0, s.fuel - dt * 0.5);
+  }
+  if (keys.right) {
+    s.orbitSpeed = Math.min(1.5, s.orbitSpeed + 0.5 * dt);
+    s.fuel = Math.max(0, s.fuel - dt * 0.5);
+  }
+
+  // Smooth orbit radius transition
+  s.orbitRadius = lerp(s.orbitRadius, s.orbitTargetRadius, dt * 2);
+
+  // Calculate orbit stability based on speed and radius
+  const idealSpeed = Math.sqrt(1000 / s.orbitRadius) * 0.5;
+  const speedDiff = Math.abs(s.orbitSpeed - idealSpeed);
+  s.orbitStability = Math.max(0, 100 - speedDiff * 50);
+
+  // Update orbit angle
   s.orbitAngle += s.orbitSpeed * dt;
+
+  // Warning if stability is low
+  if (s.orbitStability < 50 && s.modeTimer % 2 < 0.1) {
+    s.message = 'WARNING: Orbit unstable!';
+    s.messageTimer = 0.5;
+    s.messageType = 'warning';
+  }
+
   return s;
 }
 
-function tickLanding(s: GameState, dt: number, canvas: { w: number; h: number }): GameState {
-  const totalDuration = 5;
-  const t = Math.min(1, s.modeTimer / totalDuration);
+function tickLanding(s: GameState, dt: number, keys: Keys, canvas: { w: number; h: number }): GameState {
+  // Gravity increases as we get closer to surface
+  const gravity = 30 + (10000 - s.landingAltitude) * 0.005;
 
-  // Phase transitions
-  if (t < 0.15) {
+  // Player thrust control
+  s.landingThrust = 0;
+  if (keys.up) {
+    s.landingThrust = 1;
+    s.landingVerticalSpeed -= 80 * dt; // Thrust upward
+    s.fuel = Math.max(0, s.fuel - dt * 3);
+  }
+
+  // Horizontal correction
+  if (keys.left) {
+    s.landingHorizontalSpeed -= 40 * dt;
+    s.fuel = Math.max(0, s.fuel - dt * 1);
+  }
+  if (keys.right) {
+    s.landingHorizontalSpeed += 40 * dt;
+    s.fuel = Math.max(0, s.fuel - dt * 1);
+  }
+
+  // Apply gravity
+  s.landingVerticalSpeed += gravity * dt;
+
+  // Damping on horizontal speed
+  s.landingHorizontalSpeed *= 0.95;
+
+  // Update altitude
+  s.landingAltitude -= s.landingVerticalSpeed * dt;
+
+  // Determine landing phase based on altitude
+  if (s.landingAltitude > 50000) {
     s.landingPhase = 'deorbit';
-    s.landingAltitude = lerp(100000, 50000, t / 0.15);
-  } else if (t < 0.4) {
+    s.landingShake = 0;
+  } else if (s.landingAltitude > 10000) {
     s.landingPhase = 'entry';
-    s.landingAltitude = lerp(50000, 10000, (t - 0.15) / 0.25);
-    s.landingShake = 3;
+    s.landingShake = 2;
     // Atmospheric particles
-    if (s.currentPlanet?.hasAtmosphere && Math.random() > 0.5) {
+    if (s.currentPlanet?.hasAtmosphere && Math.random() > 0.6) {
       s.particles.push(makeParticle(
         canvas.w / 2 + (Math.random() - 0.5) * canvas.w,
         -10,
@@ -497,35 +676,31 @@ function tickLanding(s: GameState, dt: number, canvas: { w: number; h: number })
         'atmosphere'
       ));
     }
-  } else if (t < 0.75) {
+  } else if (s.landingAltitude > 500) {
     s.landingPhase = 'descent';
-    s.landingAltitude = lerp(10000, 500, (t - 0.4) / 0.35);
-    s.landingShake = 2 * (1 - (t - 0.4) / 0.35);
-  } else if (t < 0.95) {
+    s.landingShake = 1;
+  } else if (s.landingAltitude > 10) {
     s.landingPhase = 'final';
-    s.landingAltitude = lerp(500, 10, (t - 0.75) / 0.2);
-    s.landingShake = 1 * (1 - (t - 0.75) / 0.2);
+    s.landingShake = 0.5;
     // Engine dust
-    for (let i = 0; i < 2; i++) {
-      s.particles.push(makeParticle(
-        canvas.w / 2 + (Math.random() - 0.5) * 30,
-        canvas.h * 0.6 + 15,
-        (Math.random() - 0.5) * 60,
-        20 + Math.random() * 40,
-        0.4 + Math.random() * 0.3,
-        2 + Math.random() * 3,
-        s.currentPlanet?.groundColors[0] || '#888',
-        'dust'
-      ));
+    if (s.landingThrust > 0 && Math.random() > 0.5) {
+      for (let i = 0; i < 2; i++) {
+        s.particles.push(makeParticle(
+          canvas.w / 2 + (Math.random() - 0.5) * 30,
+          canvas.h * 0.6 + 15,
+          (Math.random() - 0.5) * 60,
+          20 + Math.random() * 40,
+          0.4 + Math.random() * 0.3,
+          2 + Math.random() * 3,
+          s.currentPlanet?.groundColors[0] || '#888',
+          'dust'
+        ));
+      }
     }
-  } else {
-    s.landingPhase = 'touchdown';
-    s.landingAltitude = 0;
-    s.landingShake = 0;
   }
 
-  // Engine particles during landing
-  if (t < 0.95 && Math.random() > 0.4) {
+  // Engine particles when thrusting
+  if (s.landingThrust > 0 && Math.random() > 0.4) {
     s.particles.push(makeParticle(
       canvas.w / 2 + (Math.random() - 0.5) * 12,
       canvas.h * 0.45 + 20,
@@ -538,18 +713,71 @@ function tickLanding(s: GameState, dt: number, canvas: { w: number; h: number })
     ));
   }
 
-  if (t >= 1 && s.landingPhase === 'touchdown' && s.modeTimer > totalDuration + 0.5) {
-    // Auto transition to surface
-    s.mode = 'surface';
+  // Check landing conditions
+  if (s.landingAltitude <= 0) {
+    s.landingAltitude = 0;
+    const verticalSpeedSafe = Math.abs(s.landingVerticalSpeed) < 30;
+    const horizontalSpeedSafe = Math.abs(s.landingHorizontalSpeed) < 20;
+
+    if (verticalSpeedSafe && horizontalSpeedSafe) {
+      // Successful landing
+      s.landingPhase = 'touchdown';
+      s.landingShake = 0;
+      s.landingSuccess = true;
+      s.mode = 'surface';
+      s.modeTimer = 0;
+      s.playerX = s.landerX;
+      s.playerY = s.landerY + 80;
+      s.playerVX = 0;
+      s.playerVY = 0;
+      s.playerAngle = -Math.PI / 2;
+      s.message = `LANDED ON ${s.currentPlanet?.name.toUpperCase()}`;
+      s.messageTimer = 2.5;
+      s.messageType = 'success';
+    } else {
+      // Crash landing
+      s.landingPhase = 'crashed';
+      s.landingShake = 5;
+      s.hull = Math.max(0, s.hull - 30);
+      s.message = 'LANDING FAILED - Too fast!';
+      s.messageTimer = 3;
+      s.messageType = 'warning';
+
+      // Explosion particles
+      for (let i = 0; i < 20; i++) {
+        s.particles.push(makeParticle(
+          canvas.w / 2 + (Math.random() - 0.5) * 50,
+          canvas.h * 0.5 + (Math.random() - 0.5) * 50,
+          (Math.random() - 0.5) * 200,
+          (Math.random() - 0.5) * 200,
+          0.5 + Math.random() * 0.5,
+          3 + Math.random() * 4,
+          `hsl(${Math.random() * 60}, 100%, ${50 + Math.random() * 30}%)`,
+          'spark'
+        ));
+      }
+
+      // Return to orbit to try again
+      setTimeout(() => {
+        s.mode = 'orbit';
+        s.modeTimer = 0;
+        s.landingAltitude = 100000;
+        s.landingVerticalSpeed = 0;
+        s.landingHorizontalSpeed = 0;
+      }, 2000);
+    }
+  }
+
+  // Out of fuel check
+  if (s.fuel <= 0 && s.landingAltitude > 0) {
+    s.message = 'OUT OF FUEL - Landing failed!';
+    s.messageTimer = 3;
+    s.messageType = 'warning';
+    s.mode = 'orbit';
     s.modeTimer = 0;
-    s.playerX = s.landerX;
-    s.playerY = s.landerY + 80;
-    s.playerVX = 0;
-    s.playerVY = 0;
-    s.playerAngle = -Math.PI / 2;
-    s.message = `LANDED ON ${s.currentPlanet?.name.toUpperCase()}`;
-    s.messageTimer = 2.5;
-    s.messageType = 'success';
+    s.landingAltitude = 100000;
+    s.landingVerticalSpeed = 0;
+    s.landingHorizontalSpeed = 0;
   }
 
   return s;
@@ -634,6 +862,133 @@ function tickSurface(s: GameState, dt: number, keys: Keys, _canvas: { w: number;
       s.currentPlanet.groundColors[0] + '80',
       'dust'
     ));
+  }
+
+  return s;
+}
+
+function tickAtmosphericProbe(s: GameState, dt: number, keys: Keys, canvas: { w: number; h: number }): GameState {
+  // Atmospheric probe mission - player controls a probe descending through atmosphere
+  // Similar to landing but with mission objectives
+
+  const gravity = 20;
+  const thrustPower = 60;
+
+  // Player thrust control
+  s.landingThrust = 0;
+  if (keys.up) {
+    s.landingThrust = 1;
+    s.landingVerticalSpeed -= thrustPower * dt;
+    s.fuel = Math.max(0, s.fuel - dt * 2);
+  }
+  if (keys.down) {
+    s.landingVerticalSpeed += thrustPower * 0.5 * dt;
+  }
+  if (keys.left) {
+    s.landingHorizontalSpeed -= 30 * dt;
+    s.fuel = Math.max(0, s.fuel - dt * 1);
+  }
+  if (keys.right) {
+    s.landingHorizontalSpeed += 30 * dt;
+    s.fuel = Math.max(0, s.fuel - dt * 1);
+  }
+
+  // Apply gravity
+  s.landingVerticalSpeed += gravity * dt;
+  s.landingHorizontalSpeed *= 0.95;
+
+  // Update altitude
+  s.landingAltitude -= s.landingVerticalSpeed * dt;
+
+  // Atmospheric particles
+  if (Math.random() > 0.5) {
+    s.particles.push(makeParticle(
+      canvas.w / 2 + (Math.random() - 0.5) * canvas.w,
+      -10,
+      (Math.random() - 0.5) * 50 + s.landingHorizontalSpeed,
+      150 + Math.random() * 200,
+      0.6 + Math.random() * 0.4,
+      2 + Math.random() * 3,
+      s.currentPlanet?.atmosphereColor.replace(/[\d.]+\)$/, '0.4)') || 'rgba(100,100,100,0.4)',
+      'atmosphere'
+    ));
+  }
+
+  // Engine particles
+  if (s.landingThrust > 0 && Math.random() > 0.4) {
+    s.particles.push(makeParticle(
+      canvas.w / 2 + (Math.random() - 0.5) * 12,
+      canvas.h * 0.45 + 20,
+      (Math.random() - 0.5) * 30,
+      40 + Math.random() * 60,
+      0.3 + Math.random() * 0.3,
+      2 + Math.random() * 3,
+      `hsl(${20 + Math.random() * 20}, 100%, ${50 + Math.random() * 30}%)`,
+      'exhaust'
+    ));
+  }
+
+  // Check scan targets (atmospheric data points)
+  s.nearTarget = null;
+  for (const t of s.scanTargets) {
+    if (!t.scanned) {
+      // For atmospheric probes, targets are at specific altitudes
+      const targetAltitude = 80000 - t.id * 25000; // Different altitudes
+      if (Math.abs(s.landingAltitude - targetAltitude) < 2000 && Math.abs(s.landingHorizontalSpeed) < 30) {
+        s.nearTarget = t;
+        break;
+      }
+    }
+  }
+
+  // Space key to scan
+  if (keys.space && s.nearTarget && !s.nearTarget.scanned) {
+    keys.space = false;
+    s.scanTargets = s.scanTargets.map(t =>
+      t.id === s.nearTarget!.id ? { ...t, scanned: true } : t
+    );
+    s.missionProgress++;
+    s.researchPoints += 100;
+    s.message = `+100 RP — ${s.nearTarget.label} collected!`;
+    s.messageTimer = 2;
+    s.messageType = 'info';
+    s.nearTarget = null;
+
+    if (s.missionProgress >= s.missionTarget) {
+      s.mode = 'mission-complete';
+      s.message = 'ATMOSPHERIC SURVEY COMPLETE!';
+      s.messageTimer = 3;
+      s.messageType = 'success';
+    }
+  }
+
+  // Check if probe reached too deep (crash)
+  if (s.landingAltitude <= 0) {
+    s.message = 'PROBE LOST - Descended too deep!';
+    s.messageTimer = 3;
+    s.messageType = 'warning';
+    s.hull = Math.max(0, s.hull - 20);
+
+    // Return to orbit
+    setTimeout(() => {
+      s.mode = 'orbit';
+      s.modeTimer = 0;
+      s.landingAltitude = 100000;
+      s.landingVerticalSpeed = 0;
+      s.landingHorizontalSpeed = 0;
+    }, 2000);
+  }
+
+  // Out of fuel
+  if (s.fuel <= 0) {
+    s.message = 'OUT OF FUEL - Probe failed!';
+    s.messageTimer = 3;
+    s.messageType = 'warning';
+    s.mode = 'orbit';
+    s.modeTimer = 0;
+    s.landingAltitude = 100000;
+    s.landingVerticalSpeed = 0;
+    s.landingHorizontalSpeed = 0;
   }
 
   return s;
