@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { frameRetentionFactor, getLandingOutcome, landingGravityAtAltitude } from './physics.js';
 import {
   GameState,
   GameMode,
@@ -467,8 +468,9 @@ function tickSpaceFlight(s: GameState, dt: number, keys: Keys, canvas: { w: numb
   }
 
   // Light damping (space has no friction, but we add minimal drag for playability)
-  s.flightShipVX *= 0.98;
-  s.flightShipVY *= 0.98;
+  const flightDamping = frameRetentionFactor(0.98, dt);
+  s.flightShipVX *= flightDamping;
+  s.flightShipVY *= flightDamping;
 
   // Update position
   s.flightShipX += s.flightShipVX * dt;
@@ -627,7 +629,7 @@ function tickOrbit(s: GameState, dt: number, keys: Keys): GameState {
 
 function tickLanding(s: GameState, dt: number, keys: Keys, canvas: { w: number; h: number }): GameState {
   // Gravity increases as we get closer to surface
-  const gravity = 30 + (10000 - s.landingAltitude) * 0.005;
+  const gravity = landingGravityAtAltitude(s.landingAltitude);
 
   // Player thrust control
   s.landingThrust = 0;
@@ -651,7 +653,7 @@ function tickLanding(s: GameState, dt: number, keys: Keys, canvas: { w: number; 
   s.landingVerticalSpeed += gravity * dt;
 
   // Damping on horizontal speed
-  s.landingHorizontalSpeed *= 0.95;
+  s.landingHorizontalSpeed *= frameRetentionFactor(0.95, dt);
 
   // Update altitude
   s.landingAltitude -= s.landingVerticalSpeed * dt;
@@ -716,10 +718,7 @@ function tickLanding(s: GameState, dt: number, keys: Keys, canvas: { w: number; 
   // Check landing conditions
   if (s.landingAltitude <= 0) {
     s.landingAltitude = 0;
-    const verticalSpeedSafe = Math.abs(s.landingVerticalSpeed) < 30;
-    const horizontalSpeedSafe = Math.abs(s.landingHorizontalSpeed) < 20;
-
-    if (verticalSpeedSafe && horizontalSpeedSafe) {
+      if (getLandingOutcome(s.landingVerticalSpeed, s.landingHorizontalSpeed) === 'success') {
       // Successful landing
       s.landingPhase = 'touchdown';
       s.landingShake = 0;
@@ -757,19 +756,18 @@ function tickLanding(s: GameState, dt: number, keys: Keys, canvas: { w: number; 
         ));
       }
 
-      // Return to orbit to try again
-      setTimeout(() => {
-        s.mode = 'orbit';
-        s.modeTimer = 0;
-        s.landingAltitude = 100000;
-        s.landingVerticalSpeed = 0;
-        s.landingHorizontalSpeed = 0;
-      }, 2000);
+      // Transition immediately; timers inside the frame loop can mutate stale state.
+      s.mode = 'orbit';
+      s.modeTimer = 0;
+      s.landingAltitude = 100000;
+      s.landingVerticalSpeed = 0;
+      s.landingHorizontalSpeed = 0;
+      s.nearTarget = null;
     }
   }
 
   // Out of fuel check
-  if (s.fuel <= 0 && s.landingAltitude > 0) {
+  if (s.mode === 'landing' && s.fuel <= 0 && s.landingAltitude > 0) {
     s.message = 'OUT OF FUEL - Landing failed!';
     s.messageTimer = 3;
     s.messageType = 'warning';
@@ -805,8 +803,9 @@ function tickSurface(s: GameState, dt: number, keys: Keys, _canvas: { w: number;
     s.playerMoving = false;
   }
 
-  s.playerVX *= friction;
-  s.playerVY *= friction;
+  const surfaceDamping = frameRetentionFactor(friction, dt);
+  s.playerVX *= surfaceDamping;
+  s.playerVY *= surfaceDamping;
 
   const maxSpeed = speed;
   const spd = Math.hypot(s.playerVX, s.playerVY);
@@ -969,18 +968,17 @@ function tickAtmosphericProbe(s: GameState, dt: number, keys: Keys, canvas: { w:
     s.messageType = 'warning';
     s.hull = Math.max(0, s.hull - 20);
 
-    // Return to orbit
-    setTimeout(() => {
-      s.mode = 'orbit';
-      s.modeTimer = 0;
-      s.landingAltitude = 100000;
-      s.landingVerticalSpeed = 0;
-      s.landingHorizontalSpeed = 0;
-    }, 2000);
+    // Transition immediately so this failure is handled only once.
+    s.mode = 'orbit';
+    s.modeTimer = 0;
+    s.landingAltitude = 100000;
+    s.landingVerticalSpeed = 0;
+    s.landingHorizontalSpeed = 0;
+    s.nearTarget = null;
   }
 
   // Out of fuel
-  if (s.fuel <= 0) {
+  if (s.mode === 'atmospheric-probe' && s.fuel <= 0) {
     s.message = 'OUT OF FUEL - Probe failed!';
     s.messageTimer = 3;
     s.messageType = 'warning';
