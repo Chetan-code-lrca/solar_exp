@@ -718,7 +718,7 @@ function tickLanding(s: GameState, dt: number, keys: Keys, canvas: { w: number; 
   // Check landing conditions
   if (s.landingAltitude <= 0) {
     s.landingAltitude = 0;
-      if (getLandingOutcome(s.landingVerticalSpeed, s.landingHorizontalSpeed) === 'success') {
+    if (getLandingOutcome(s.landingVerticalSpeed, s.landingHorizontalSpeed) === 'success') {
       // Successful landing
       s.landingPhase = 'touchdown';
       s.landingShake = 0;
