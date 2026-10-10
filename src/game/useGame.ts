@@ -894,7 +894,7 @@ function tickAtmosphericProbe(s: GameState, dt: number, keys: Keys, canvas: { w:
 
   // Apply gravity
   s.landingVerticalSpeed += gravity * dt;
-  s.landingHorizontalSpeed *= 0.95;
+  s.landingHorizontalSpeed *= frameRetentionFactor(0.95, dt);
 
   // Update altitude
   s.landingAltitude -= s.landingVerticalSpeed * dt;
