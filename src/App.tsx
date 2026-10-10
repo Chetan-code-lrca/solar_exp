@@ -6,7 +6,6 @@ import { PLANETS } from './game/types';
 export default function App() {
   const {
     state,
-    canvasRef: sizeRef,
     setCanvasSize,
     beginExpedition,
     selectPlanet,
