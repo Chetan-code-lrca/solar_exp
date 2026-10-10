@@ -21,7 +21,7 @@ test("landing gravity rejects non-finite altitude", () => {
 });
 
 test("frame damping preserves its 60 Hz retention and scales with delta time", () => {
-  assert.equal(frameRetentionFactor(0.98, 1 / 60), 0.98);
+  assert.ok(Math.abs(frameRetentionFactor(0.98, 1 / 60) - 0.98) < 1e-12);
   assert.ok(Math.abs(frameRetentionFactor(0.98, 2 / 60) - 0.98 ** 2) < 1e-12);
   assert.equal(frameRetentionFactor(0.95, 0), 1);
 });
